@@ -1,0 +1,12 @@
+# Core RL stack
+# NOTE: PyTorch with CUDA must be installed separately using the official
+# instructions at https://pytorch.org/get-started/locally/ — the version
+# here is CPU-only and will NOT use your GPU.
+torch
+mujoco
+gymnasium
+stable-baselines3
+
+# Utilities
+numpy
+onnxruntime      # for exporting trained policy to run on the Raspberry Pi
