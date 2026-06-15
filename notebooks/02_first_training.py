@@ -65,8 +65,8 @@ model = PPO(
     gamma=0.99,             # how much to value future reward vs. now
     gae_lambda=0.95,        # smoothing parameter for advantage estimation
     clip_range=0.2,         # PPO's core: limits how much policy can change at once
+    device="cpu",           # MlpPolicy trains faster on CPU than GPU for small networks
     verbose=1,
-    tensorboard_log=str(SAVE_DIR / "logs"),
 )
 
 print("PPO agent created.")
