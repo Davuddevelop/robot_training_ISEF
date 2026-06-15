@@ -92,7 +92,6 @@ print()
 model.learn(
     total_timesteps=TOTAL_STEPS,
     callback=checkpoint,
-    progress_bar=True,
 )
 
 # --- SAVE ---
