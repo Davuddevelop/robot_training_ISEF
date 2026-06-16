@@ -1,0 +1,74 @@
+<!--
+  scene.xml — Our Bittle simulation scene.
+
+  This file is OUR work (defensible to a judge). It takes the community body
+  model (bittle_body.xml) and adds the three things that make it trainable:
+
+    1. A floor to walk on + a light + camera framing.
+    2. ACTUATORS — 8 position-controlled "servos", one per leg joint. We command
+       a TARGET ANGLE (like a real hobby servo), and forcerange caps the torque
+       to a realistic value (~0.55 N·m, close to Bittle's metal-gear servos).
+    3. SENSORS — exactly the signals your observation design lists:
+         orientation       (IMU quaternion)        -> "which way is up"
+         angular_velocity  (IMU gyro)               -> "how fast am I tipping"
+         8 joint angles     (jointpos)              -> current leg positions
+         torso_pos / torso_vel                       -> for the reward (distance/speed)
+
+  The "home" keyframe is the neutral standing pose (all leg joints at 0.56 rad).
+-->
+<mujoco model="bittle_scene">
+  <include file="bittle_body.xml"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <statistic center="0 0 0.05" extent="0.4"/>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1=".1 .2 .3" rgb2=".2 .3 .4"
+             width="300" height="300"/>
+    <material name="grid" texture="grid" texrepeat="8 8" reflectance="0.2"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" type="plane" size="0 0 0.05" material="grid"
+          friction="0.8 0.02 0.01"/>
+  </worldbody>
+
+  <!-- 8 servos: command = target joint angle (radians). -->
+  <actuator>
+    <position name="lb_shoulder" joint="left-back-shoulder-joint"   kp="20" ctrlrange="-1.5708 1.6"     forcerange="-0.55 0.55"/>
+    <position name="lb_knee"     joint="left-back-knee-joint"       kp="20" ctrlrange="-1.22173 1.48353" forcerange="-0.55 0.55"/>
+    <position name="lf_shoulder" joint="left-front-shoulder-joint"  kp="20" ctrlrange="-1.5708 1.6"     forcerange="-0.55 0.55"/>
+    <position name="lf_knee"     joint="left-front-knee-joint"      kp="20" ctrlrange="-1.22173 1.48353" forcerange="-0.55 0.55"/>
+    <position name="rb_shoulder" joint="right-back-shoulder-joint"  kp="20" ctrlrange="-1.5708 1.6"     forcerange="-0.55 0.55"/>
+    <position name="rb_knee"     joint="right-back-knee-joint"      kp="20" ctrlrange="-1.22173 1.48353" forcerange="-0.55 0.55"/>
+    <position name="rf_shoulder" joint="right-front-shoulder-joint" kp="20" ctrlrange="-1.5708 1.6"     forcerange="-0.55 0.55"/>
+    <position name="rf_knee"     joint="right-front-knee-joint"     kp="20" ctrlrange="-1.22173 1.48353" forcerange="-0.55 0.55"/>
+  </actuator>
+
+  <!-- Sensors matching the observation design in CLAUDE.md §7. -->
+  <sensor>
+    <framequat   name="orientation"      objtype="site" objname="imu"/>
+    <gyro        name="angular_velocity" site="imu"/>
+    <framepos    name="torso_pos"        objtype="site" objname="imu"/>
+    <velocimeter name="torso_vel"        site="imu"/>
+
+    <jointpos name="lb_shoulder_angle" joint="left-back-shoulder-joint"/>
+    <jointpos name="lb_knee_angle"     joint="left-back-knee-joint"/>
+    <jointpos name="lf_shoulder_angle" joint="left-front-shoulder-joint"/>
+    <jointpos name="lf_knee_angle"     joint="left-front-knee-joint"/>
+    <jointpos name="rb_shoulder_angle" joint="right-back-shoulder-joint"/>
+    <jointpos name="rb_knee_angle"     joint="right-back-knee-joint"/>
+    <jointpos name="rf_shoulder_angle" joint="right-front-shoulder-joint"/>
+    <jointpos name="rf_knee_angle"     joint="right-front-knee-joint"/>
+  </sensor>
+
+  <keyframe>
+    <!-- 7 freejoint values (xyz + quaternion) then 8 leg-joint angles. -->
+    <key name="home" qpos="0 0 0.085  1 0 0 0  0.56 0.56 0.56 0.56 0.56 0.56 0.56 0.56"/>
+  </keyframe>
+</mujoco>

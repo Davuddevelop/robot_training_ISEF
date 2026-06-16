@@ -1,51 +1,44 @@
-# Getting the Bittle MuJoCo Model
+# The Bittle MuJoCo Model — already in the repo ✅
 
-The Bittle simulation uses a community-made MuJoCo model of the robot.
-We do not include it in this repo because it is someone else's work.
+**You do not need to download anything.** The Bittle model is now committed to
+this project (and verified to load and stand in MuJoCo 3.9.0). After a
+`git pull`, you have it.
 
-## The two repos you need
+## Where it lives
 
-**Option A — URDF only (needs conversion):**
-https://github.com/AIWintermuteAI/Bittle_URDF
-Contains URDF files and mesh (.obj) files for Bittle.
-URDF is a different robot description format — needs converting to MuJoCo XML.
+```
+src/sim/bittle_model/
+    scene.xml         ← OUR scene: floor + 8 servos + IMU/joint sensors + home pose
+    bittle_body.xml   ← the community body model (links, joints, inertias)
+    assets/*.obj      ← the 3D meshes the body uses
+    MODEL_SOURCE.md   ← where the body came from + how to describe it honestly
+```
 
-**Option B — MuJoCo XML (ready to use):**
-https://github.com/gravesreid/mujoco_mpc_bittle
-Contains a MuJoCo XML model of Bittle (converted from URDF).
-This is the one to use — it's already in the right format.
+See `bittle_model/MODEL_SOURCE.md` for the source and attribution.
 
-## Exact steps (do this with your mentor)
+## See it in 3D (do this first)
 
-1. Go to https://github.com/gravesreid/mujoco_mpc_bittle
-2. Look inside the repo for a folder named `bittle/` or `mjpc/tasks/bittle/`
-   It should contain a `.xml` file and a folder of mesh files.
-3. Download those files.
-4. Place them here in YOUR project:
-   ```
-   src/sim/bittle_model/
-       bittle.xml        ← the main MuJoCo XML model file
-       assets/           ← mesh (.stl or .obj) files for the 3D body parts
-   ```
-5. Test it loads:
-   ```
-   D:\robot_venv\Scripts\python.exe src/sim/test_render.py
-   ```
-   A 3D window should open showing the Bittle robot standing.
+```
+D:\robot_venv\Scripts\python.exe notebooks\10_view_bittle.py
+```
 
-## What is a MuJoCo XML model?
+A 3D window opens showing the Bittle standing on a checkered floor — four legs
+pointing **down** under the body (the dog shape, not the spider Ant). Drag with
+the mouse to orbit and inspect it.
+
+## What a MuJoCo XML model is
 
 It is a text file describing the robot in full detail:
-- Every body part (torso, 4 thighs, 4 shins) with its mass and size
+- Every body part with its mass and size, and the meshes that draw it
 - Every joint connecting them, with angle limits
-- Every actuator (motor) and its force limits
-- The ground plane and gravity
+- Every actuator (servo) and its torque limit
+- The ground plane, light, gravity, and sensors
 
-When you open it in a text editor, it looks like HTML with robot-specific tags.
-You do not need to write this file from scratch — you refine it for system
-identification in Phase 4 (adjusting mass, motor gains to match the real robot).
+Open `scene.xml` in your editor — it reads like HTML with robot tags. You can
+already explain every line of it (we wrote the comments for exactly that).
 
-## After you have the model
+## What's next
 
-Run `test_render.py` to confirm it works, then come back here and we will
-wire it into `bittle_env.py` to replace the stubs.
+We wire `scene.xml` into `bittle_env.py` (currently stubbed) to make a Gymnasium
+environment, then train it with the same PPO + VecNormalize pipeline we proved on
+Ant. We will build `bittle_env.py` together, in small pieces — see CLAUDE.md §2.
