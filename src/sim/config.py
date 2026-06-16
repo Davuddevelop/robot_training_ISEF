@@ -74,10 +74,12 @@ REWARD = {
     # walking clearly worth more than standing.
     "forward_velocity_coeff": 5.0,
 
-    # Positive: small flat bonus for staying alive (not falling). Kept SMALL on
-    # purpose — just enough to discourage suicidal falling, not enough to make
-    # standing still a winning strategy.
-    "alive_bonus": 0.1,
+    # Positive: bonus for each step it stays upright (does not fall). With
+    # forward_velocity_coeff=5.0 a moving robot always out-scores a standing one,
+    # so this no longer causes standing-still — instead it makes SURVIVING pay,
+    # which stops the "lunge forward then fall over" behaviour (a 300k run moved
+    # 0.36 m but fell after 70 of 500 steps when this was only 0.1).
+    "alive_bonus": 0.5,
 
     # Negative: penalty if the robot tilts too much.
     # Applied when roll or pitch exceeds this threshold (radians).
