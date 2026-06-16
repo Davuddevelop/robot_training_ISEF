@@ -18,13 +18,15 @@ build/
 # Jupyter
 .ipynb_checkpoints/
 
-# Large model files — commit only intentionally
-models/*.zip
-models/*.pt
-models/*.onnx
+# Training run artifacts (saved models, checkpoints, monitor logs,
+# normalization stats) — these are large and fully reproducible, so they
+# are generated locally and never committed. The folder README stays tracked.
+models/*
+!models/README.md
 
-# Experiment data — commit summaries, not raw logs
+# Experiment data — commit summaries, not raw logs or generated plots
 data/raw/
+data/*.png
 
 # IDE
 .vscode/
