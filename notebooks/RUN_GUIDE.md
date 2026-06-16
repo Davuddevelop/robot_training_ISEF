@@ -12,24 +12,31 @@ carry over directly to Bittle.
 |---|---|
 | `00_environment_check.py` | Confirms every package + the GPU are installed. |
 | `02_first_training.py` | The very first demo run (default settings). Kept for history. |
-| `05_improved_training.py` | **The main training script.** Tuned + normalized. Run this. |
+| `05_improved_training.py` | Tuned + normalized run (ant_v2). Ant learned to crawl. |
+| `07_upright_training.py` | **Current best script.** Adds upright reward fixes → ant_v3. |
 | `04_plot_learning_curve.py` | Draws the learning curve (reward vs. steps) → saves a PNG. |
 | `06_evaluate.py` | Reports numbers: mean reward, episode length, **forward distance**. |
 | `03_watch_trained_agent.py` | Opens a 3D window to watch the trained policy. |
 
-## How to run (after `git pull`)
+## How to run the upright training (ant_v3)
 
 ```
-D:\robot_venv\Scripts\python.exe notebooks\05_improved_training.py
+D:\robot_venv\Scripts\python.exe notebooks\07_upright_training.py
+```
+
+Then evaluate and watch:
+```
+(PowerShell)
+$env:ANT_RUN_NAME="ant_v3"
 D:\robot_venv\Scripts\python.exe notebooks\06_evaluate.py
 D:\robot_venv\Scripts\python.exe notebooks\04_plot_learning_curve.py
 D:\robot_venv\Scripts\python.exe notebooks\03_watch_trained_agent.py
 ```
 
-Quick test before committing an hour to training? Shorten it:
+Quick test before committing hours to training? Shorten it:
 ```
 (PowerShell)  $env:ANT_TIMESTEPS=50000
-D:\robot_venv\Scripts\python.exe notebooks\05_improved_training.py
+D:\robot_venv\Scripts\python.exe notebooks\07_upright_training.py
 ```
 
 ## Key engineering decisions (be ready to explain these)
@@ -64,13 +71,17 @@ distance in a fixed time; this is the same idea.
   permissive height range while learning, tighten later.
 - **Reward can lie; distance tells the truth.** A short run scored ~995 reward
   but moved 0.08 m — it had learned to stand still, not walk.
+- **Agents optimise what you measure — measure carefully.** ant_v2 learned to
+  crawl because forward distance was rewarded but upright posture was not.
+  Adding a height reward (ant_v3) gives the agent a reason to stand tall.
 - **Change one thing at a time, starting from known-good defaults.** This is
   also exactly the method of your ablation study.
 
 ## Run folders under `models/`
 
-- `ant_first_run/` — the 300k demo.
+- `ant_first_run/` — the 300k demo (no VecNormalize, CPU only).
 - `ant_improved/` — the failed too-strict-height run (kept for comparison).
-- `ant_v2/` — the current normalized + tuned run.
+- `ant_v2/` — normalized + tuned 2M step run. Ant walked but crawled.
+- `ant_v3/` — upright training: height reward + heavier contact cost. Target: upright gait.
 
 Each keeps its own `monitor_logs/` so learning curves never mix.

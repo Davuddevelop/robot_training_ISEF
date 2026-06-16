@@ -26,14 +26,14 @@ import matplotlib.pyplot as plt
 # SB3 helpers that read the monitor CSV files for us.
 # load_results: reads every *.monitor.csv in a folder into one table.
 # ts2xy: converts that table into x = cumulative timesteps, y = episode reward.
+import os
+
 from stable_baselines3.common.monitor import load_results
 from stable_baselines3.common.results_plotter import ts2xy
 
-# Which run to plot. Change this one line to switch between runs:
-#   "ant_first_run" = the 300k demo run
-#   "ant_improved"  = the first 1M run (curve was flat/negative — too-strict height rule)
-#   "ant_v2"        = the corrected 1M run
-RUN_NAME = "ant_v2"
+# Switch run with env var, e.g.:  $env:ANT_RUN_NAME="ant_v3"
+# Runs: ant_first_run, ant_improved, ant_v2, ant_v3
+RUN_NAME = os.environ.get("ANT_RUN_NAME", "ant_v2")
 
 RUN_DIR = pathlib.Path(__file__).parent.parent / "models" / RUN_NAME
 MONITOR_DIR = RUN_DIR / "monitor_logs"

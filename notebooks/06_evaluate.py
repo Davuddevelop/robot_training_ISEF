@@ -16,10 +16,12 @@ It loads the saved VecNormalize statistics so observations are scaled exactly
 as in training (feeding raw observations to a model trained on normalized ones
 produces broken behaviour).
 
-Run AFTER 05_improved_training.py:
+Run AFTER any training script. Switch run with the ANT_RUN_NAME env var:
+    (PowerShell)  $env:ANT_RUN_NAME="ant_v3"
     D:\\robot_venv\\Scripts\\python.exe notebooks\\06_evaluate.py
 """
 
+import os
 import pathlib
 
 import numpy as np
@@ -28,9 +30,9 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 
-RUN_NAME = "ant_v2"
+RUN_NAME = os.environ.get("ANT_RUN_NAME", "ant_v2")
 SAVE_DIR = pathlib.Path(__file__).parent.parent / "models" / RUN_NAME
-MODEL_PATH = SAVE_DIR / "ant_v2_model"
+MODEL_PATH = SAVE_DIR / f"{RUN_NAME}_model"
 VECNORM_PATH = SAVE_DIR / "vecnormalize.pkl"
 
 N_EVAL_EPISODES = 10
