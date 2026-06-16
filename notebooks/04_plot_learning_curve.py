@@ -31,8 +31,9 @@ from stable_baselines3.common.results_plotter import ts2xy
 
 # Which run to plot. Change this one line to switch between runs:
 #   "ant_first_run" = the 300k demo run
-#   "ant_improved"  = the 1M dog-like run
-RUN_NAME = "ant_improved"
+#   "ant_improved"  = the first 1M run (curve was flat/negative — too-strict height rule)
+#   "ant_v2"        = the corrected 1M run
+RUN_NAME = "ant_v2"
 
 RUN_DIR = pathlib.Path(__file__).parent.parent / "models" / RUN_NAME
 MONITOR_DIR = RUN_DIR / "monitor_logs"

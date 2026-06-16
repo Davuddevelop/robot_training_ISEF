@@ -13,9 +13,10 @@ from stable_baselines3 import PPO
 import pathlib
 import time
 
-# Switch between the two models by uncommenting the one you want to watch.
+# Switch between models by uncommenting the one you want to watch.
 # MODEL_PATH = pathlib.Path(__file__).parent.parent / "models" / "ant_first_run" / "ant_300k"
-MODEL_PATH = pathlib.Path(__file__).parent.parent / "models" / "ant_improved" / "ant_1M"
+# MODEL_PATH = pathlib.Path(__file__).parent.parent / "models" / "ant_improved" / "ant_1M"
+MODEL_PATH = pathlib.Path(__file__).parent.parent / "models" / "ant_v2" / "ant_v2_1M"
 
 if not MODEL_PATH.with_suffix(".zip").exists():
     print("Model not found. Run 02_first_training.py first.")

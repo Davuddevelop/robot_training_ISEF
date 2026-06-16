@@ -22,7 +22,11 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import CheckpointCallback
 import pathlib
 
-SAVE_DIR = pathlib.Path(__file__).parent.parent / "models" / "ant_improved"
+# Fresh run folder. The previous run ("ant_improved") had a flat, negative
+# learning curve because the healthy-height rule was too strict. We keep that
+# run's data for comparison and write THIS corrected run to a new folder, so
+# the two learning curves stay separate and clean.
+SAVE_DIR = pathlib.Path(__file__).parent.parent / "models" / "ant_v2"
 MONITOR_DIR = SAVE_DIR / "monitor_logs"
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 MONITOR_DIR.mkdir(parents=True, exist_ok=True)
@@ -51,21 +55,27 @@ ENV_KWARGS = {
 
     # --- CONTACT FORCE PENALTY ---
     # Penalty for large forces at contact points (feet hitting ground too hard).
-    # Default is 5e-4. We reduce it slightly to allow more dynamic stepping.
-    "contact_cost_weight": 2e-4,
+    # Back to the tested default — one less thing changed from known-good.
+    "contact_cost_weight": 5e-4,
 
     # --- ALIVE BONUS ---
     # Flat reward per step just for staying upright and functional.
-    # Encourages the policy to stay healthy even when it's not moving fast.
+    # This is why a healthy walking episode scores strongly POSITIVE: it
+    # collects this bonus on every one of up to 1000 steps. If episodes die
+    # early, the agent barely collects it — which is what went wrong last time.
     "healthy_reward": 1.0,
 
-    # --- BODY HEIGHT RANGE ---
-    # The robot is considered "healthy" (gets the alive bonus) only if its
-    # torso stays within this height range (in meters).
-    # Default: (0.2, 1.0) — allows belly-crawling or wild jumping.
-    # We tighten the lower bound to 0.35 to discourage crawling.
-    # RESULT: the robot stays upright like a dog, not like a snake.
-    "healthy_z_range": (0.35, 1.0),
+    # --- BODY HEIGHT RANGE  (THE KEY FIX) ---
+    # The episode ENDS ("unhealthy") if the torso leaves this height range.
+    # Last run used a lower bound of 0.35m. Early in training the Ant cannot
+    # hold itself that high, so episodes were killed within a few steps —
+    # before the agent could learn anything. The reward stayed flat and
+    # negative because almost no alive-bonus was ever collected.
+    # FIX: back to the tested default (0.2, 1.0). Let it learn first; we can
+    # tighten toward "more upright" LATER, once it can already walk.
+    # LESSON (this is your science too): change ONE thing at a time, and start
+    # from settings that are known to work.
+    "healthy_z_range": (0.2, 1.0),
 
     # --- EPISODE LENGTH ---
     # How many steps each episode runs before resetting (if not fallen).
@@ -74,15 +84,19 @@ ENV_KWARGS = {
 }
 
 print("=" * 60)
-print("  Improved Training — Dog-Like Locomotion")
+print("  Training v2 — Corrected Reward Design")
 print("=" * 60)
 print()
-print("Reward design vs. first run:")
-print("  ctrl_cost_weight:  0.5  →  0.05  (robot uses legs more freely)")
-print("  healthy_z_range:   0.2+ →  0.35+ (robot stays upright, not crawling)")
-print("  episode length:    500  →  1000  (robot must sustain walking longer)")
+print("What went wrong last run (ant_improved):")
+print("  healthy_z_range lower bound was 0.35m -> episodes died instantly")
+print("  -> flat, negative learning curve (agent never learned to walk)")
 print()
-print("Expected: smoother, more upright, more forward-directed movement.")
+print("This run (ant_v2):")
+print("  healthy_z_range:   0.35 -> 0.2   (let it survive long enough to learn)")
+print("  ctrl_cost_weight:  0.5  -> 0.05  (robot uses legs more freely)")
+print("  network:           64x64 -> 256x256 (more capacity)")
+print()
+print("Expected now: a curve that CLIMBS into positive reward and flattens.")
 print()
 
 n_envs = 4
@@ -123,7 +137,7 @@ print()
 checkpoint = CheckpointCallback(
     save_freq=100_000 // n_envs,
     save_path=str(SAVE_DIR / "checkpoints"),
-    name_prefix="ant_improved",
+    name_prefix="ant_v2",
     verbose=1,
 )
 
@@ -137,10 +151,12 @@ model.learn(
     callback=checkpoint,
 )
 
-model.save(str(SAVE_DIR / "ant_1M"))
+model.save(str(SAVE_DIR / "ant_v2_1M"))
 print()
-print(f"Saved: {SAVE_DIR / 'ant_1M.zip'}")
+print(f"Saved: {SAVE_DIR / 'ant_v2_1M.zip'}")
 print()
-print("Run 04_plot_learning_curve.py with MONITOR_DIR updated to see the curve.")
-print("Run 03_watch_trained_agent.py with MODEL_PATH updated to see it walk.")
+print("Next:")
+print("  1) python notebooks/04_plot_learning_curve.py   (curve should climb now)")
+print("  2) python notebooks/03_watch_trained_agent.py    (watch it walk)")
+print("Both scripts already point at the ant_v2 run.")
 env.close()
