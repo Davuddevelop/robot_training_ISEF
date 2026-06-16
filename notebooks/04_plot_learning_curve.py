@@ -29,12 +29,16 @@ import matplotlib.pyplot as plt
 from stable_baselines3.common.monitor import load_results
 from stable_baselines3.common.results_plotter import ts2xy
 
-# Where the training script wrote its logs, and where we will save the graph.
-RUN_DIR = pathlib.Path(__file__).parent.parent / "models" / "ant_first_run"
+# Which run to plot. Change this one line to switch between runs:
+#   "ant_first_run" = the 300k demo run
+#   "ant_improved"  = the 1M dog-like run
+RUN_NAME = "ant_improved"
+
+RUN_DIR = pathlib.Path(__file__).parent.parent / "models" / RUN_NAME
 MONITOR_DIR = RUN_DIR / "monitor_logs"
 DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_PNG = DATA_DIR / "ant_learning_curve.png"
+OUTPUT_PNG = DATA_DIR / f"{RUN_NAME}_learning_curve.png"
 
 
 def moving_average(values, window):
