@@ -28,6 +28,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.callbacks import CheckpointCallback
 
 from src.sim.bittle_env import BittleEnv
 from src.sim.config import PPO as PPO_CFG
@@ -81,8 +82,17 @@ def main():
         verbose=1,
     )
 
+    # Save a checkpoint every 100,000 steps so a crash loses at most 100k steps.
+    checkpoint = CheckpointCallback(
+        save_freq=100_000,
+        save_path=str(SAVE_DIR / "checkpoints"),
+        name_prefix="bittle_ckpt",
+        save_vecnormalize=True,
+    )
+
     print(f"\nTraining for {TOTAL_STEPS:,} steps...\n")
-    model.learn(total_timesteps=TOTAL_STEPS, reset_num_timesteps=True)
+    print(f"  Checkpoints saved every 100,000 steps → {SAVE_DIR}/checkpoints/\n")
+    model.learn(total_timesteps=TOTAL_STEPS, reset_num_timesteps=True, callback=checkpoint)
 
     print("\nSaving...")
     model.save(str(MODEL_PATH))
