@@ -1,162 +1,180 @@
 """
-05_improved_training.py — Better training for more natural, dog-like movement.
+05_improved_training.py — The best-quality training run (Ant, dog-like gait).
 
-The first run (02_first_training.py) used default Ant settings — fine for
-a demo, but not shaped for natural locomotion. This script tunes the reward
-function and environment parameters to produce movement that looks much more
-like a real walking dog: smooth, forward-moving, upright, energy-efficient.
+This is the upgraded pipeline. Compared with the earlier runs it adds the one
+ingredient that most reliably makes PPO locomotion actually work:
 
-These reward terms are EXACTLY what we will use for Bittle. So understanding
-this script means understanding your entire research project.
+    VecNormalize — it keeps a running mean and standard deviation of the
+    observations (and rewards) and rescales them so every number the network
+    sees is roughly in the range [-1, 1]. Neural networks learn badly when
+    some inputs are tiny (a joint angle of 0.02) and others are huge (a
+    velocity of 15). Normalizing puts them on the same scale. This is standard
+    practice in every serious RL codebase and is exactly what the tuned
+    reference settings (Stable-Baselines3 RL Zoo) use for Ant.
 
-Run with:
+Everything is commented so you can read and defend it. The hyperparameters are
+close to the community-standard PPO-for-MuJoCo recipe, not random guesses.
+
+Run with (after `git pull`):
     D:\\robot_venv\\Scripts\\python.exe notebooks\\05_improved_training.py
 
-Training time: ~45-90 minutes for 1,000,000 steps on CPU.
-Start it and let it run while you study or sleep.
+Want a shorter test first? Override the step count:
+    (PowerShell)  $env:ANT_TIMESTEPS=50000; D:\\robot_venv\\Scripts\\python.exe notebooks\\05_improved_training.py
 """
+
+import os
+import pathlib
 
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback
-import pathlib
 
-# Fresh run folder. The previous run ("ant_improved") had a flat, negative
-# learning curve because the healthy-height rule was too strict. We keep that
-# run's data for comparison and write THIS corrected run to a new folder, so
-# the two learning curves stay separate and clean.
-SAVE_DIR = pathlib.Path(__file__).parent.parent / "models" / "ant_v2"
+# --- WHERE EVERYTHING IS SAVED ---
+# A fresh run folder, kept separate from the earlier (failed) runs so its
+# learning curve and model stay clean and comparable.
+RUN_NAME = "ant_v2"
+SAVE_DIR = pathlib.Path(__file__).parent.parent / "models" / RUN_NAME
 MONITOR_DIR = SAVE_DIR / "monitor_logs"
-SAVE_DIR.mkdir(parents=True, exist_ok=True)
-MONITOR_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_PATH = SAVE_DIR / "ant_v2_model"          # the trained network (.zip added automatically)
+VECNORM_PATH = SAVE_DIR / "vecnormalize.pkl"    # the saved obs/reward scaling — needed to use the model later
 
 # ---------------------------------------------------------------------------
-# THE REWARD DESIGN — this is the most important part of this file.
-#
-# Ant-v5 lets us pass parameters that shape the reward function directly.
-# Each one answers: "what do we want the robot to care about?"
-# This is where your engineering judgment goes into code.
+# REWARD DESIGN (Ant-v5 lets us shape the reward through these parameters).
+# These are the SAME ideas we will use for Bittle, so understanding this block
+# means understanding your project's reward design.
 # ---------------------------------------------------------------------------
-
 ENV_KWARGS = {
-    # --- FORWARD MOVEMENT ---
-    # How much the robot is rewarded for moving forward (in the x-direction).
-    # Higher = the policy will push for more speed, but may sacrifice stability.
-    # Default is 1.0. We keep it at 1.0 — speed is the primary goal.
+    # Reward for moving forward (x-direction). The main objective.
     "forward_reward_weight": 1.0,
 
-    # --- ENERGY EFFICIENCY (action cost) ---
-    # Penalty for large joint torques (a proxy for energy use).
-    # Default is 0.5 — very conservative, which makes the ant hesitant to move.
-    # We reduce it to 0.05 so the robot isn't afraid to use its legs.
-    # RESULT: more active, decisive leg movements. More dog-like.
+    # Penalty for large joint torques (energy proxy). Default 0.5 is timid;
+    # 0.05 lets the robot use its legs decisively -> more natural movement.
     "ctrl_cost_weight": 0.05,
 
-    # --- CONTACT FORCE PENALTY ---
-    # Penalty for large forces at contact points (feet hitting ground too hard).
-    # Back to the tested default — one less thing changed from known-good.
+    # Penalty for hard foot impacts. Tested default — left alone.
     "contact_cost_weight": 5e-4,
 
-    # --- ALIVE BONUS ---
-    # Flat reward per step just for staying upright and functional.
-    # This is why a healthy walking episode scores strongly POSITIVE: it
-    # collects this bonus on every one of up to 1000 steps. If episodes die
-    # early, the agent barely collects it — which is what went wrong last time.
+    # Reward per step for staying "healthy" (upright and within height range).
+    # Over up to 1000 steps this is what makes a good episode score high.
     "healthy_reward": 1.0,
 
-    # --- BODY HEIGHT RANGE  (THE KEY FIX) ---
-    # The episode ENDS ("unhealthy") if the torso leaves this height range.
-    # Last run used a lower bound of 0.35m. Early in training the Ant cannot
-    # hold itself that high, so episodes were killed within a few steps —
-    # before the agent could learn anything. The reward stayed flat and
-    # negative because almost no alive-bonus was ever collected.
-    # FIX: back to the tested default (0.2, 1.0). Let it learn first; we can
-    # tighten toward "more upright" LATER, once it can already walk.
-    # LESSON (this is your science too): change ONE thing at a time, and start
-    # from settings that are known to work.
+    # Episode ENDS if the torso leaves this height band (metres).
+    # The tested default (0.2, 1.0). An earlier run used 0.35 here and it
+    # killed episodes before the agent could learn — we do NOT repeat that.
     "healthy_z_range": (0.2, 1.0),
 
-    # --- EPISODE LENGTH ---
-    # How many steps each episode runs before resetting (if not fallen).
-    # Longer episodes = the robot needs to sustain walking, not just get lucky.
+    # Max steps per episode before reset (if it hasn't fallen).
     "max_episode_steps": 1000,
 }
 
-print("=" * 60)
-print("  Training v2 — Corrected Reward Design")
-print("=" * 60)
-print()
-print("What went wrong last run (ant_improved):")
-print("  healthy_z_range lower bound was 0.35m -> episodes died instantly")
-print("  -> flat, negative learning curve (agent never learned to walk)")
-print()
-print("This run (ant_v2):")
-print("  healthy_z_range:   0.35 -> 0.2   (let it survive long enough to learn)")
-print("  ctrl_cost_weight:  0.5  -> 0.05  (robot uses legs more freely)")
-print("  network:           64x64 -> 256x256 (more capacity)")
-print()
-print("Expected now: a curve that CLIMBS into positive reward and flattens.")
-print()
+# ---------------------------------------------------------------------------
+# TRAINING SETTINGS (PPO). Close to the standard PPO-for-MuJoCo recipe.
+# ---------------------------------------------------------------------------
+N_ENVS = 4                       # parallel simulations -> bigger, more stable batches
+TOTAL_STEPS = int(os.environ.get("ANT_TIMESTEPS", 2_000_000))  # override via env var for quick tests
 
-n_envs = 4
-
-env = make_vec_env(
-    "Ant-v5",
-    n_envs=n_envs,
-    monitor_dir=str(MONITOR_DIR),
-    env_kwargs=ENV_KWARGS,
-)
-
-print(f"Environment: {n_envs} parallel Ant simulations")
-print(f"Observation: {env.observation_space.shape[0]} numbers")
-print(f"Actions:     {env.action_space.shape[0]} joint torques")
-print()
-
-model = PPO(
-    policy="MlpPolicy",
-    env=env,
-    learning_rate=3e-4,
-    n_steps=2048,
-    batch_size=64,
-    n_epochs=10,
-    gamma=0.99,
-    gae_lambda=0.95,
-    clip_range=0.2,
-    # Network architecture: two hidden layers of 256 neurons each.
-    # Bigger than default (64) because locomotion needs more capacity.
-    policy_kwargs={"net_arch": [256, 256]},
-    device="cpu",
+PPO_KWARGS = dict(
+    learning_rate=3e-4,          # step size for weight updates
+    n_steps=2048,                # steps PER ENV before each update (x4 envs = 8192 per update)
+    batch_size=256,              # minibatch size for each gradient step (8192 / 256 = 32 minibatches)
+    n_epochs=10,                 # times each batch of data is reused
+    gamma=0.99,                  # how far ahead the agent plans
+    gae_lambda=0.95,             # bias/variance trade-off in advantage estimation
+    clip_range=0.2,              # PPO's core: cap how far the policy moves per update
+    ent_coef=0.0,                # exploration bonus (0.0 is standard for continuous control)
+    vf_coef=0.5,                 # weight of the value-function loss
+    max_grad_norm=0.5,           # clip gradients to avoid destabilising spikes
+    policy_kwargs={"net_arch": [256, 256]},  # two hidden layers of 256 neurons
+    device="cpu",                # small MLP trains faster on CPU than GPU
     verbose=1,
 )
 
-print(f"Policy network: {sum(p.numel() for p in model.policy.parameters()):,} parameters")
-print(f"  (bigger network than last time — more capacity for complex movement)")
-print()
 
-checkpoint = CheckpointCallback(
-    save_freq=100_000 // n_envs,
-    save_path=str(SAVE_DIR / "checkpoints"),
-    name_prefix="ant_v2",
-    verbose=1,
-)
+def make_normalized_env():
+    """
+    Build the vectorised, monitored, NORMALIZED training environment.
 
-TOTAL_STEPS = 1_000_000
-print(f"Training for {TOTAL_STEPS:,} steps (~45-90 min on CPU).")
-print("Checkpoints saved every 100k steps — you can stop and resume anytime.")
-print()
+    Order matters:
+      1. make_vec_env wraps each Ant in a Monitor that records the TRUE
+         (un-normalized) episode reward -> the learning curve stays meaningful.
+      2. VecNormalize then rescales what the *agent* sees, without touching
+         what Monitor logged.
+    """
+    venv = make_vec_env(
+        "Ant-v5",
+        n_envs=N_ENVS,
+        monitor_dir=str(MONITOR_DIR),
+        env_kwargs=ENV_KWARGS,
+    )
+    venv = VecNormalize(
+        venv,
+        norm_obs=True,     # rescale observations to ~zero mean / unit variance
+        norm_reward=True,  # rescale rewards too (helps PPO stability)
+        clip_obs=10.0,     # clip extreme normalized values
+    )
+    return venv
 
-model.learn(
-    total_timesteps=TOTAL_STEPS,
-    callback=checkpoint,
-)
 
-model.save(str(SAVE_DIR / "ant_v2_1M"))
-print()
-print(f"Saved: {SAVE_DIR / 'ant_v2_1M.zip'}")
-print()
-print("Next:")
-print("  1) python notebooks/04_plot_learning_curve.py   (curve should climb now)")
-print("  2) python notebooks/03_watch_trained_agent.py    (watch it walk)")
-print("Both scripts already point at the ant_v2 run.")
-env.close()
+def main():
+    SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    MONITOR_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 64)
+    print("  Training — Ant, normalized + tuned (best version)")
+    print("=" * 64)
+    print(f"  Run folder:     {SAVE_DIR}")
+    print(f"  Total steps:    {TOTAL_STEPS:,}  (override with ANT_TIMESTEPS)")
+    print(f"  Parallel envs:  {N_ENVS}")
+    print(f"  Key upgrade:    VecNormalize (obs + reward scaling)")
+    print("=" * 64)
+    print()
+
+    env = make_normalized_env()
+    print(f"Observation size: {env.observation_space.shape[0]} numbers")
+    print(f"Action size:      {env.action_space.shape[0]} joint torques")
+
+    model = PPO("MlpPolicy", env, **PPO_KWARGS)
+    n_params = sum(p.numel() for p in model.policy.parameters())
+    print(f"Policy network:   {n_params:,} parameters (two 256-neuron layers)")
+    print()
+
+    # Save the model periodically so a crash or Ctrl+C never loses everything.
+    checkpoint = CheckpointCallback(
+        save_freq=max(100_000 // N_ENVS, 1),
+        save_path=str(SAVE_DIR / "checkpoints"),
+        name_prefix="ant_v2",
+        verbose=1,
+    )
+
+    print("Training... watch 'rollout/ep_rew_mean' — it should climb.")
+    print("(Press Ctrl+C to stop early; the latest checkpoint is kept.)\n")
+    model.learn(total_timesteps=TOTAL_STEPS, callback=checkpoint)
+
+    # Save BOTH the model AND the normalization statistics. You need both to
+    # use the policy later — feeding raw, un-normalized observations to a model
+    # trained on normalized ones produces garbage. This is the #1 mistake
+    # people make with VecNormalize.
+    model.save(str(MODEL_PATH))
+    env.save(str(VECNORM_PATH))
+
+    print()
+    print("=" * 64)
+    print("  Done.")
+    print(f"  Model saved:         {MODEL_PATH}.zip")
+    print(f"  Normalization stats: {VECNORM_PATH}")
+    print()
+    print("  Next:")
+    print("    1) python notebooks/04_plot_learning_curve.py   (curve should climb)")
+    print("    2) python notebooks/06_evaluate.py              (numbers: mean reward)")
+    print("    3) python notebooks/03_watch_trained_agent.py   (watch it walk)")
+    print("=" * 64)
+    env.close()
+
+
+if __name__ == "__main__":
+    # The __main__ guard is standard practice: it lets other files import this
+    # one without accidentally launching a training run, and it is required if
+    # you ever switch to subprocess-based parallel environments on Windows.
+    main()

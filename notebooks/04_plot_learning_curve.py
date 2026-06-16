@@ -97,8 +97,12 @@ def main():
     print(f"\nSaved graph to: {OUTPUT_PNG}")
     print("Open it. An upward trend that flattens out means training worked.")
 
-    # Also pop it up on screen.
-    plt.show()
+    # Also pop it up on screen. Wrapped in try/except so it still works on a
+    # machine without a display (the PNG is saved regardless).
+    try:
+        plt.show()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
