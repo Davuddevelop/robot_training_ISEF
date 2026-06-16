@@ -18,7 +18,11 @@ Read this file carefully. You should be able to explain every line.
 # Layout of the 23-element observation vector.
 # Indices tell you where each piece of information lives in the array.
 OBS_LAYOUT = {
-    "imu_orientation":    (0, 3),   # roll, pitch, yaw from the IMU (radians)
+    "imu_orientation":    (0, 3),   # "projected gravity": the direction of DOWN as seen
+                                    # from the robot's own body. [0,0,-1] when perfectly
+                                    # upright; tilts away as the robot leans. This is what
+                                    # an IMU effectively gives you, and it makes sim-to-real
+                                    # robust (no absolute-heading drift like yaw has).
     "imu_angular_vel":    (3, 6),   # how fast the robot is rotating on each axis (rad/s)
     "last_joint_angles":  (6, 14),  # the 8 joint angles we commanded last step
     "previous_action":    (14, 22), # the 8 joint angle offsets from the step before that
@@ -46,10 +50,13 @@ ACTION_DIM = 8          # 8 leg joints (4 legs × 2 joints each: hip + knee)
 ACTION_LIMIT = 0.5      # maximum offset from neutral pose, in radians (~28 degrees)
                         # Larger values risk hardware damage on real servos.
 
-# Neutral standing pose for each joint (radians), in the order:
-# [FR_hip, FR_knee, FL_hip, FL_knee, BR_hip, BR_knee, BL_hip, BL_knee]
-# FR = Front Right, FL = Front Left, BR = Back Right, BL = Back Left
-NEUTRAL_POSE = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+# Neutral standing pose for each joint (radians), in the SAME order the actuators
+# appear in scene.xml:
+#   [lb_shoulder, lb_knee, lf_shoulder, lf_knee, rb_shoulder, rb_knee, rf_shoulder, rf_knee]
+#   (l/r = left/right, b/f = back/front)
+# 0.56 rad is the model's "home" keyframe — the pose where it stands stably.
+# The policy's actions are offsets ADDED to this pose.
+NEUTRAL_POSE = [0.56, 0.56, 0.56, 0.56, 0.56, 0.56, 0.56, 0.56]
 # NOTE: refine these once you measure the real Bittle's resting joint angles.
 
 # ---------------------------------------------------------------------------
@@ -60,14 +67,17 @@ NEUTRAL_POSE = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 # ---------------------------------------------------------------------------
 
 REWARD = {
-    # Positive: reward forward movement.
-    # Multiplied by velocity in the x-direction (m/s).
-    # Higher coefficient = the policy cares more about speed.
-    "forward_velocity_coeff": 1.0,
+    # Positive: reward forward movement (m/s in the robot's forward direction).
+    # This MUST dominate, or the policy just stands still to farm the alive bonus.
+    # We learned this the hard way: with coeff=1.0 and alive=0.5, a 60k-step run
+    # scored 250 reward but walked 0.03 m — it stood still. Raising this makes
+    # walking clearly worth more than standing.
+    "forward_velocity_coeff": 5.0,
 
-    # Positive: flat bonus just for staying alive (not falling).
-    # Encourages the policy to stay upright even if it moves slowly.
-    "alive_bonus": 0.5,
+    # Positive: small flat bonus for staying alive (not falling). Kept SMALL on
+    # purpose — just enough to discourage suicidal falling, not enough to make
+    # standing still a winning strategy.
+    "alive_bonus": 0.1,
 
     # Negative: penalty if the robot tilts too much.
     # Applied when roll or pitch exceeds this threshold (radians).
@@ -163,7 +173,22 @@ PPO = {
     "n_steps": 2048,
 
     # How many samples to use per gradient update (subset of n_steps).
-    "batch_size": 64,
+    "batch_size": 256,
+
+    # How many parallel copies of the environment to collect experience from.
+    # More envs = more diverse data per update = steadier learning.
+    "n_envs": 4,
+
+    # Entropy bonus: nudges the policy to keep exploring instead of committing
+    # too early. 0.0 works well for locomotion with normalized observations.
+    "ent_coef": 0.0,
+
+    # Value-function loss weight and gradient clipping — standard PPO defaults.
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5,
+
+    # Hidden layers of the policy/value networks (two layers of 256 neurons).
+    "net_arch": [256, 256],
 
     # How many times to reuse the collected data for updates.
     # PPO's key innovation: safe to reuse data a few times without diverging.
@@ -197,6 +222,6 @@ PPO = {
 import pathlib
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
-BITTLE_MODEL_PATH = PROJECT_ROOT / "src" / "sim" / "bittle_model" / "bittle.xml"
+BITTLE_MODEL_PATH = PROJECT_ROOT / "src" / "sim" / "bittle_model" / "scene.xml"
 MODELS_DIR = PROJECT_ROOT / "models"
 DATA_DIR = PROJECT_ROOT / "data"

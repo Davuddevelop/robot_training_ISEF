@@ -10,15 +10,14 @@ STRUCTURE: A Gymnasium environment is a Python class with exactly these methods:
     step()    — takes one action, returns (observation, reward, done, info)
     close()   — cleanup
 
-You will study the Gymnasium API in Phase 3 of your learning roadmap.
-When you do, come back here — it will make immediate sense.
+The robot faces +Y (its head sits at +Y in the model), so "forward" is +Y.
 """
 
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+import mujoco
 
-# Our config file — all the numbers we defined live there.
 from src.sim.config import (
     OBS_DIM, ACTION_DIM, ACTION_LIMIT,
     NEUTRAL_POSE, REWARD, DOMAIN_RAND,
@@ -26,231 +25,239 @@ from src.sim.config import (
     BITTLE_MODEL_PATH,
 )
 
+# The model faces +Y, so forward progress is movement along the world Y axis.
+FORWARD_AXIS = 1  # 0 = x, 1 = y, 2 = z
+
 
 class BittleEnv(gym.Env):
-    """
-    Gymnasium environment for the Petoi Bittle quadruped robot in MuJoCo.
+    """Gymnasium environment for the Petoi Bittle quadruped robot in MuJoCo."""
 
-    This class inherits from gym.Env, which means it MUST implement:
-        reset(), step(), close()
-    and MUST define:
-        self.observation_space
-        self.action_space
+    metadata = {"render_modes": ["human"]}
 
-    Think of gym.Env as a contract: SB3 calls these methods in a specific
-    order and expects specific return types. We fulfill that contract here.
-    """
-
-    # Gymnasium needs this to know what kind of rendering we support.
-    metadata = {"render_modes": ["human", "rgb_array"]}
-
-    def __init__(self, render_mode=None, domain_rand=True):
+    def __init__(self, render_mode=None, domain_rand=False):
         """
-        Sets up the environment. Called once before training starts.
-
         Args:
             render_mode: "human" opens a viewer window; None = headless (faster).
-            domain_rand: if True, randomizes physics parameters each episode.
-                         Set to False for evaluation / real-robot deployment.
+            domain_rand: if True, randomizes physics each episode (for the
+                         robustness experiments). Default False = clean baseline,
+                         which is also experimental condition (1) "no randomization".
         """
         super().__init__()
-
         self.render_mode = render_mode
         self.domain_rand = domain_rand
 
-        # --- OBSERVATION SPACE ---
-        # Tells SB3 what shape and range observations have.
-        # Box = a multi-dimensional array of continuous values.
-        # low/high = the minimum and maximum value for each element.
-        # dtype = float32 (32-bit float — standard for neural networks)
+        # --- Spaces (the contract with SB3) ---
         self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(OBS_DIM,),
-            dtype=np.float32,
+            low=-np.inf, high=np.inf, shape=(OBS_DIM,), dtype=np.float32
         )
-
-        # --- ACTION SPACE ---
-        # 8 joint angle offsets, each bounded to [-ACTION_LIMIT, +ACTION_LIMIT].
+        # Policy outputs in [-1, 1] (what SB3 learns best with); we scale to
+        # ±ACTION_LIMIT radians inside step(). Keeps the network's job simple.
         self.action_space = spaces.Box(
-            low=-ACTION_LIMIT,
-            high=ACTION_LIMIT,
-            shape=(ACTION_DIM,),
-            dtype=np.float32,
+            low=-1.0, high=1.0, shape=(ACTION_DIM,), dtype=np.float32
         )
 
-        # --- INTERNAL STATE ---
-        # These track what's happening during an episode.
-        self._step_count = 0               # how many steps taken in current episode
-        self._prev_action = np.zeros(ACTION_DIM)   # action from last step (for smoothness penalty)
-        self._gait_phase = 0.0             # counts 0→1→0→1... to provide rhythm signal
+        # --- Load the MuJoCo model (our scene.xml: body + servos + sensors) ---
+        self._mj_model = mujoco.MjModel.from_xml_path(str(BITTLE_MODEL_PATH))
+        self._mj_model.opt.timestep = SIM_TIMESTEP
+        self._mj_data = mujoco.MjData(self._mj_model)
 
-        # --- MuJoCo MODEL ---
-        # Not loaded yet — we load it lazily on first reset() to keep __init__ fast.
-        # TODO (Phase 2): load MuJoCo model here once you understand the MuJoCo API.
-        self._mj_model = None
-        self._mj_data = None
+        # How many physics steps make one control step (0.02 / 0.002 = 10).
+        self._n_substeps = int(round(CONTROL_TIMESTEP / SIM_TIMESTEP))
+
+        # Cache the ids we read every step (looking them up by name is slow).
+        self._root_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_BODY, "root")
+        self._home_key = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_KEY, "home")
+        self._gyro_adr = self._sensor_adr("angular_velocity")
+
+        self._neutral = np.array(NEUTRAL_POSE, dtype=np.float64)
+        self._ctrl_low = self._mj_model.actuator_ctrlrange[:, 0].copy()
+        self._ctrl_high = self._mj_model.actuator_ctrlrange[:, 1].copy()
+
+        # Save the "nominal" physics values so domain randomization always
+        # scales from the original, never from an already-randomized value.
+        self._base_body_mass = self._mj_model.body_mass.copy()
+        self._base_force = self._mj_model.actuator_forcerange.copy()
+        self._floor_geom = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        self._base_friction = self._mj_model.geom_friction.copy()
+
+        # --- Episode state ---
+        self._step_count = 0
+        self._prev_action = np.zeros(ACTION_DIM)       # action from the previous step
+        self._prev_action_for_obs = np.zeros(ACTION_DIM)
+        self._last_command = self._neutral.copy()      # absolute angles we last commanded
+        self._gait_phase = 0.0
+        self._latency_steps = 0
+        self._command_buffer = []
+
         self._viewer = None
 
+    # ------------------------------------------------------------------ helpers
+    def _sensor_adr(self, name):
+        """Return (start_index, length) of a named sensor inside data.sensordata."""
+        sid = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+        adr = int(self._mj_model.sensor_adr[sid])
+        dim = int(self._mj_model.sensor_dim[sid])
+        return adr, dim
+
+    def _projected_gravity(self):
+        """
+        Direction of gravity ('down') expressed in the robot's body frame.
+
+        data.xmat is the 3x3 rotation of the root body (body axes in world).
+        The body's up-axis in world is its 3rd column = (xmat[2], xmat[5], xmat[8]).
+        Gravity in the body frame is therefore (-xmat[2], -xmat[5], -xmat[8]):
+        [0, 0, -1] when upright, tilting away as the robot leans.
+        """
+        xmat = self._mj_data.xmat[self._root_id]
+        return np.array([-xmat[2], -xmat[5], -xmat[8]], dtype=np.float64)
+
+    def _uprightness(self):
+        """xmat[8] = how aligned the body-up axis is with world-up. 1.0 = perfectly upright."""
+        return float(self._mj_data.xmat[self._root_id][8])
+
+    # ------------------------------------------------------------------ reset
     def reset(self, seed=None, options=None):
-        """
-        Starts a new episode. Called at the beginning of every training episode.
-
-        Steps:
-          1. Reset the MuJoCo simulation to a standing pose.
-          2. If domain randomization is on, randomize physics parameters.
-          3. Add small random noise to the starting joint angles.
-          4. Return the first observation.
-
-        Returns:
-            observation (np.ndarray): shape (OBS_DIM,) — what the robot "sees"
-            info (dict): extra diagnostic info (can be empty)
-        """
         super().reset(seed=seed)
 
         self._step_count = 0
         self._prev_action = np.zeros(ACTION_DIM)
+        self._prev_action_for_obs = np.zeros(ACTION_DIM)
+        self._last_command = self._neutral.copy()
         self._gait_phase = 0.0
 
-        # TODO (Phase 2): implement MuJoCo reset using mujoco.mj_resetData()
-        # TODO (Phase 2): apply domain randomization if self.domain_rand is True
-        # TODO (Phase 2): apply initial pose noise from DOMAIN_RAND["initial_pose"]
+        # Start from the home keyframe (neutral standing pose).
+        mujoco.mj_resetDataKeyframe(self._mj_model, self._mj_data, self._home_key)
 
-        observation = self._get_obs()
-        info = {}
-        return observation, info
+        if self.domain_rand:
+            self._apply_domain_randomization()
 
+        # Small random offset on each starting joint angle (qpos[7:15] = 8 joints).
+        if self.domain_rand and DOMAIN_RAND["initial_pose"]["enabled"]:
+            std = DOMAIN_RAND["initial_pose"]["std"]
+            self._mj_data.qpos[7:7 + ACTION_DIM] += self.np_random.normal(0, std, ACTION_DIM)
+
+        # Set up the control-latency delay buffer for this episode.
+        self._latency_steps = 0
+        if self.domain_rand and DOMAIN_RAND["control_latency"]["enabled"]:
+            lo, hi = DOMAIN_RAND["control_latency"]["range"]
+            latency_secs = self.np_random.uniform(lo, hi)
+            self._latency_steps = int(round(latency_secs / CONTROL_TIMESTEP))
+        self._command_buffer = [self._neutral.copy()] * (self._latency_steps + 1)
+
+        # Recompute derived quantities (positions, sensors) after our edits.
+        mujoco.mj_forward(self._mj_model, self._mj_data)
+
+        return self._get_obs(), {}
+
+    def _apply_domain_randomization(self):
+        """Randomize physics for this episode. These are the research variables."""
+        m, rng = self._mj_model, self.np_random
+
+        if DOMAIN_RAND["friction"]["enabled"]:
+            lo, hi = DOMAIN_RAND["friction"]["range"]
+            m.geom_friction[self._floor_geom, 0] = rng.uniform(lo, hi)
+
+        if DOMAIN_RAND["body_mass"]["enabled"]:
+            lo, hi = DOMAIN_RAND["body_mass"]["range"]
+            m.body_mass[:] = self._base_body_mass * rng.uniform(lo, hi)
+
+        if DOMAIN_RAND["motor_strength"]["enabled"]:
+            lo, hi = DOMAIN_RAND["motor_strength"]["range"]
+            m.actuator_forcerange[:] = self._base_force * rng.uniform(lo, hi)
+
+    # ------------------------------------------------------------------ step
     def step(self, action):
-        """
-        Executes one control step. Called at every timestep during training.
+        # Policy gives [-1, 1]; scale to a ±ACTION_LIMIT-radian offset.
+        action = np.clip(action, -1.0, 1.0)
+        offset = action * ACTION_LIMIT
 
-        The loop (SB3 calls this repeatedly):
-          1. Receive 'action' (8 joint offsets) from the policy network.
-          2. Convert to absolute joint angles: neutral_pose + action.
-          3. Send to MuJoCo actuators.
-          4. Step the physics forward (10 physics steps = 1 control step).
-          5. Read new sensor data from MuJoCo.
-          6. Compute the reward.
-          7. Check if the episode ended (fallen or time limit).
-          8. Return everything to SB3.
+        # Target absolute angles = neutral stance + the offset.
+        target = np.clip(self._neutral + offset, self._ctrl_low, self._ctrl_high)
 
-        Args:
-            action (np.ndarray): shape (ACTION_DIM,) — joint angle offsets from policy
+        # Control latency: push the new command in, use the delayed one.
+        self._command_buffer.append(target)
+        applied = self._command_buffer.pop(0)
 
-        Returns:
-            observation  (np.ndarray): what the robot sees now
-            reward       (float):      score for this step
-            terminated   (bool):       True if robot fell — episode ends
-            truncated    (bool):       True if time limit reached — episode ends
-            info         (dict):       diagnostics (we log forward velocity here)
-        """
-        # Clip action to valid range (safety: don't damage real servos)
-        action = np.clip(action, -ACTION_LIMIT, ACTION_LIMIT)
+        # Drive the servos and advance physics by one control step.
+        self._mj_data.ctrl[:] = applied
+        for _ in range(self._n_substeps):
+            mujoco.mj_step(self._mj_model, self._mj_data)
 
-        # TODO (Phase 2): compute target_angles = NEUTRAL_POSE + action
-        # TODO (Phase 2): set mj_data.ctrl to target_angles
-        # TODO (Phase 2): step physics with mujoco.mj_step() × (CONTROL_TIMESTEP / SIM_TIMESTEP) times
-        # TODO (Phase 2): optionally add control latency from DOMAIN_RAND["control_latency"]
-
+        # Bookkeeping for the observation (we feed COMMANDED angles, not measured).
         self._step_count += 1
         self._gait_phase = (self._step_count * CONTROL_TIMESTEP) % 1.0
+        self._prev_action_for_obs = self._prev_action
+        self._last_command = target
 
         reward = self._compute_reward(action)
         terminated = self._is_fallen()
         truncated = self._step_count >= EPISODE_LENGTH_STEPS
-        observation = self._get_obs()
 
+        forward_velocity = float(self._mj_data.qvel[FORWARD_AXIS])
         self._prev_action = action.copy()
 
         info = {
             "step": self._step_count,
-            # TODO (Phase 2): log forward_velocity from mj_data
+            "forward_velocity": forward_velocity,
+            "forward_position": float(self._mj_data.qpos[FORWARD_AXIS]),
+            "height": float(self._mj_data.qpos[2]),
         }
 
         if self.render_mode == "human":
             self.render()
 
-        return observation, reward, terminated, truncated, info
+        return self._get_obs(), reward, terminated, truncated, info
 
+    # ------------------------------------------------------------------ obs
     def _get_obs(self):
-        """
-        Reads sensor data from MuJoCo and packages it into the observation vector.
+        # Orientation: projected gravity (3), optionally noised like a real IMU.
+        gravity = self._projected_gravity()
+        ang_vel = self._mj_data.sensordata[self._gyro_adr[0]:
+                                           self._gyro_adr[0] + self._gyro_adr[1]].copy()
+        if self.domain_rand and DOMAIN_RAND["imu_noise"]["enabled"]:
+            std = DOMAIN_RAND["imu_noise"]["std"]
+            gravity = gravity + self.np_random.normal(0, std, 3)
+            ang_vel = ang_vel + self.np_random.normal(0, std, 3)
 
-        Observation layout (see config.py OBS_LAYOUT for indices):
-          [0:3]   IMU orientation (roll, pitch, yaw)
-          [3:6]   IMU angular velocity
-          [6:14]  last commanded joint angles (previous action in absolute terms)
-          [14:22] action from two steps ago
-          [22]    gait phase timer
-
-        Returns:
-            obs (np.ndarray): shape (OBS_DIM,) dtype float32
-        """
-        # TODO (Phase 2): read actual values from mj_data.sensordata / mj_data.qpos / mj_data.qvel
-        # TODO (Phase 2): add IMU noise from DOMAIN_RAND["imu_noise"] if domain_rand is True
-
-        # Placeholder: zeros until MuJoCo is wired up.
-        obs = np.zeros(OBS_DIM, dtype=np.float32)
+        obs = np.empty(OBS_DIM, dtype=np.float32)
+        obs[0:3] = gravity
+        obs[3:6] = ang_vel
+        obs[6:14] = self._last_command           # last commanded joint angles
+        obs[14:22] = self._prev_action_for_obs   # the action before that
         obs[22] = self._gait_phase
         return obs
 
+    # ------------------------------------------------------------------ reward
     def _compute_reward(self, action):
-        """
-        Computes the scalar reward for the current step.
+        forward_velocity = float(self._mj_data.qvel[FORWARD_AXIS])
 
-        Reward = (forward_velocity × coeff) + alive_bonus
-                 - (tilt_penalty if tilted)
-                 - (action_size_penalty × ||action||)
-                 - (smoothness_penalty × ||action - prev_action||)
-
-        Each term comes from config.py REWARD — you control the weights there.
-
-        Returns:
-            reward (float)
-        """
-        # TODO (Phase 2): read forward_velocity from mj_data (x-axis velocity of base)
-        forward_velocity = 0.0  # placeholder
-
-        reward = 0.0
-
-        # Forward progress (main objective)
-        reward += REWARD["forward_velocity_coeff"] * forward_velocity
-
-        # Alive bonus (encourages staying upright)
+        reward = REWARD["forward_velocity_coeff"] * forward_velocity
         reward += REWARD["alive_bonus"]
 
-        # Tilt penalty (discourages falling)
-        # TODO (Phase 2): read roll and pitch from mj_data and check against threshold
-        # if abs(roll) > REWARD["tilt_threshold"] or abs(pitch) > REWARD["tilt_threshold"]:
-        #     reward += REWARD["tilt_penalty"]
+        # Tilt penalty: how far from upright are we? (angle between body-up and world-up)
+        tilt_angle = np.arccos(np.clip(self._uprightness(), -1.0, 1.0))
+        if tilt_angle > REWARD["tilt_threshold"]:
+            reward += REWARD["tilt_penalty"]
 
-        # Action size penalty (proxy for energy/torque)
+        # Energy proxy: penalize large offsets. Jitter proxy: penalize fast changes.
         reward += REWARD["action_size_penalty"] * np.sum(np.square(action))
-
-        # Smoothness penalty (discourages jitter)
         reward += REWARD["action_smoothness_penalty"] * np.sum(np.square(action - self._prev_action))
-
         return float(reward)
 
     def _is_fallen(self):
-        """
-        Returns True if the robot has fallen (tilt exceeds fall_angle).
-        Ends the episode early — no point continuing if the robot is on its side.
+        tilt_angle = np.arccos(np.clip(self._uprightness(), -1.0, 1.0))
+        too_tilted = tilt_angle > REWARD["fall_angle"]
+        too_low = self._mj_data.qpos[2] < 0.04   # torso basically on the ground
+        return bool(too_tilted or too_low)
 
-        Returns:
-            fallen (bool)
-        """
-        # TODO (Phase 2): read roll and pitch from mj_data
-        # return abs(roll) > REWARD["fall_angle"] or abs(pitch) > REWARD["fall_angle"]
-        return False  # placeholder — never falls until MuJoCo is wired up
-
+    # ------------------------------------------------------------------ render
     def render(self):
-        """Opens the MuJoCo viewer window to watch the robot."""
-        # TODO (Phase 2): initialize mujoco.viewer.launch_passive() on first call
-        pass
+        if self._viewer is None:
+            import mujoco.viewer
+            self._viewer = mujoco.viewer.launch_passive(self._mj_model, self._mj_data)
+        self._viewer.sync()
 
     def close(self):
-        """Cleanup: close the viewer if it was opened."""
         if self._viewer is not None:
             self._viewer.close()
             self._viewer = None

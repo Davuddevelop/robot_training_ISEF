@@ -1,12 +1,42 @@
 # Training Pipeline — Run Guide & Design Notes
 
-This folder contains the **simulation learning pipeline**, built on the
-built-in MuJoCo `Ant-v5` quadruped. Ant is a stand-in we use to build and
-validate the whole workflow *before* the real Bittle model is wired in. The
-algorithm (PPO), the library (Stable-Baselines3), and every design idea here
-carry over directly to Bittle.
+The project now trains the **real Bittle model** (`src/sim/bittle_env.py` +
+`src/sim/bittle_model/scene.xml`). The earlier Ant and dm_control runs were
+stepping stones used to build and validate the workflow (PPO + VecNormalize);
+they are kept below as history. Everything we learned on them carries over.
 
-## The scripts, in order
+## ⭐ The Bittle pipeline (current — this is the project)
+
+| Script | What it does |
+|---|---|
+| `10_view_bittle.py` | Open the Bittle model in 3D, holding its neutral pose. No RL. |
+| `11_train_bittle.py` | **Train Bittle to walk** (PPO + VecNormalize) → `bittle_v1`. |
+| `13_evaluate_bittle.py` | Report reward, length, and **forward distance (m)**. |
+| `12_watch_bittle.py` | Watch the trained Bittle walk in a 3D window. |
+
+```
+# look first
+D:\robot_venv\Scripts\python.exe notebooks\10_view_bittle.py
+# train (uses src/sim/config.py for every setting)
+D:\robot_venv\Scripts\python.exe notebooks\11_train_bittle.py
+# measure, then watch
+D:\robot_venv\Scripts\python.exe notebooks\13_evaluate_bittle.py
+D:\robot_venv\Scripts\python.exe notebooks\12_watch_bittle.py
+```
+
+Quick test (50k steps, ~2 min):
+```
+(PowerShell)  $env:BITTLE_TIMESTEPS=50000
+D:\robot_venv\Scripts\python.exe notebooks\11_train_bittle.py
+```
+
+`11_train_bittle.py` uses `domain_rand=False` — this is experimental condition
+(1) "no randomization" AND the easiest setting to learn a first gait. The
+robustness conditions flip it to `True` later.
+
+---
+
+## History: the Ant / dm_control scripts (validation only)
 
 | Script | What it does |
 |---|---|
@@ -101,6 +131,10 @@ distance in a fixed time; this is the same idea.
 - **Agents optimise what you measure — measure carefully.** ant_v2 learned to
   crawl because forward distance was rewarded but upright posture was not.
   Adding a height reward (ant_v3) gives the agent a reason to stand tall.
+- **The same trap caught Bittle.** With `forward_velocity_coeff=1.0` and
+  `alive_bonus=0.5`, a 60k-step Bittle run scored 250 reward but walked 0.03 m —
+  it stood still to farm the alive bonus. Fix: raise the forward coefficient to
+  5.0 and drop the alive bonus to 0.1 so moving forward clearly beats standing.
 - **Change one thing at a time, starting from known-good defaults.** This is
   also exactly the method of your ablation study.
 
@@ -110,6 +144,7 @@ distance in a fixed time; this is the same idea.
 - `ant_improved/` — the failed too-strict-height run (kept for comparison).
 - `ant_v2/` — normalized + tuned 2M step run. Ant walked but crawled.
 - `ant_v3/` — upright training on Ant: height reward + heavier contact cost.
-- `quad_v1/` — dm_control quadruped (dog body plan). This is the closest to Bittle.
+- `quad_v1/` — dm_control quadruped (dog body plan). Stepping stone to Bittle.
+- `bittle_v1/` — **the real Bittle**, no domain randomization (condition 1).
 
 Each keeps its own `monitor_logs/` so learning curves never mix.
