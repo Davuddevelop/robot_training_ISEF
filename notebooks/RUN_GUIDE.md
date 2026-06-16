@@ -13,12 +13,39 @@ carry over directly to Bittle.
 | `00_environment_check.py` | Confirms every package + the GPU are installed. |
 | `02_first_training.py` | The very first demo run (default settings). Kept for history. |
 | `05_improved_training.py` | Tuned + normalized run (ant_v2). Ant learned to crawl. |
-| `07_upright_training.py` | **Current best script.** Adds upright reward fixes → ant_v3. |
+| `07_upright_training.py` | Upright reward fixes on Ant → ant_v3. |
+| `08_quadruped_training.py` | **Current best script.** Dog-shaped dm_control body → quad_v1. |
 | `04_plot_learning_curve.py` | Draws the learning curve (reward vs. steps) → saves a PNG. |
 | `06_evaluate.py` | Reports numbers: mean reward, episode length, **forward distance**. |
 | `03_watch_trained_agent.py` | Opens a 3D window to watch the trained policy. |
 
-## How to run the upright training (ant_v3)
+## How to run the dog-shaped quadruped training (quad_v1) ← DO THIS
+
+Install once:
+```
+D:\robot_venv\Scripts\pip.exe install dm_control shimmy[dm_control]
+```
+
+Train (3M steps, ~2-3 hours):
+```
+D:\robot_venv\Scripts\python.exe notebooks\08_quadruped_training.py
+```
+
+Evaluate and watch:
+```
+(PowerShell)
+$env:ANT_RUN_NAME="quad_v1"
+D:\robot_venv\Scripts\python.exe notebooks\06_evaluate.py
+D:\robot_venv\Scripts\python.exe notebooks\03_watch_trained_agent.py
+```
+
+Quick test (50 k steps to verify it runs):
+```
+(PowerShell)  $env:ANT_TIMESTEPS=50000
+D:\robot_venv\Scripts\python.exe notebooks\08_quadruped_training.py
+```
+
+## How to run the upright training (ant_v3) ← previous version
 
 ```
 D:\robot_venv\Scripts\python.exe notebooks\07_upright_training.py
@@ -82,6 +109,7 @@ distance in a fixed time; this is the same idea.
 - `ant_first_run/` — the 300k demo (no VecNormalize, CPU only).
 - `ant_improved/` — the failed too-strict-height run (kept for comparison).
 - `ant_v2/` — normalized + tuned 2M step run. Ant walked but crawled.
-- `ant_v3/` — upright training: height reward + heavier contact cost. Target: upright gait.
+- `ant_v3/` — upright training on Ant: height reward + heavier contact cost.
+- `quad_v1/` — dm_control quadruped (dog body plan). This is the closest to Bittle.
 
 Each keeps its own `monitor_logs/` so learning curves never mix.

@@ -1,24 +1,20 @@
 """
 06_evaluate.py — Measure how good the trained policy is, with numbers.
 
-Watching is nice; science needs numbers. This runs the trained policy for
-several episodes and reports, per episode and averaged:
-    reward    — total score (higher = better)
-    length    — steps survived (longer = more stable; max is the episode cap)
-    distance  — how far forward it actually travelled, in metres
+Works with Ant runs (ant_v2, ant_v3) and dm_control quadruped (quad_v1).
 
-WHY distance matters: a high reward can be earned just by standing still and
-collecting the per-step "alive" bonus. Distance tells you whether it is really
-WALKING. Your real project measures distance in a fixed time — this is the
-template for that metric.
-
-It loads the saved VecNormalize statistics so observations are scaled exactly
-as in training (feeding raw observations to a model trained on normalized ones
-produces broken behaviour).
-
-Run AFTER any training script. Switch run with the ANT_RUN_NAME env var:
-    (PowerShell)  $env:ANT_RUN_NAME="ant_v3"
+Switch run with the ANT_RUN_NAME env var:
+    (PowerShell)  $env:ANT_RUN_NAME="quad_v1"
     D:\\robot_venv\\Scripts\\python.exe notebooks\\06_evaluate.py
+
+For Ant:      reports reward, episode length, and DISTANCE in metres.
+For Quadruped: reports reward, episode length, and REWARD QUALITY (0–1).
+
+WHY DIFFERENT METRICS?
+Ant-v5 provides x_position in its info dict, so we can measure exact metres
+travelled. dm_control quadruped does not expose position directly, but its
+reward is already on a [0, 1] scale where 1.0 means "walking at target speed
+while perfectly upright". So reward quality IS the performance metric.
 """
 
 import os
@@ -30,81 +26,113 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 
-RUN_NAME = os.environ.get("ANT_RUN_NAME", "ant_v2")
+RUN_NAME = os.environ.get("ANT_RUN_NAME", "ant_v3")
 SAVE_DIR = pathlib.Path(__file__).parent.parent / "models" / RUN_NAME
 MODEL_PATH = SAVE_DIR / f"{RUN_NAME}_model"
 VECNORM_PATH = SAVE_DIR / "vecnormalize.pkl"
 
 N_EVAL_EPISODES = 10
 
-ENV_KWARGS = {
-    "forward_reward_weight": 1.0,
-    "ctrl_cost_weight": 0.05,
-    "contact_cost_weight": 5e-4,
-    "healthy_reward": 1.0,
-    "healthy_z_range": (0.2, 1.0),
-    "max_episode_steps": 1000,
-}
+IS_QUADRUPED = RUN_NAME.startswith("quad_")
+
+if IS_QUADRUPED:
+    ENV_ID = "dm_control/quadruped-walk-v0"
+    ENV_KWARGS = {}
+else:
+    ENV_ID = "Ant-v5"
+    _ENV_CONFIGS = {
+        "ant_v2": {"contact_cost_weight": 5e-4,  "healthy_z_range": (0.2,  1.0)},
+        "ant_v3": {"contact_cost_weight": 0.005, "healthy_z_range": (0.28, 1.0)},
+    }
+    _cfg = _ENV_CONFIGS.get(RUN_NAME, _ENV_CONFIGS["ant_v3"])
+    ENV_KWARGS = {
+        "forward_reward_weight": 1.0,
+        "ctrl_cost_weight": 0.05,
+        "healthy_reward": 1.0,
+        "max_episode_steps": 1000,
+        **_cfg,
+    }
 
 
 def main():
     if not MODEL_PATH.with_suffix(".zip").exists():
-        print(f"No model found at {MODEL_PATH}.zip — run 05_improved_training.py first.")
+        print(f"No model found at {MODEL_PATH}.zip — run the training script first.")
         return
 
+    print(f"Evaluating run: {RUN_NAME}  ({ENV_ID})")
     model = PPO.load(str(MODEL_PATH))
 
-    # Load normalization stats (for scaling observations the trained way).
     normalizer = None
     if VECNORM_PATH.exists():
-        normalizer = VecNormalize.load(
-            str(VECNORM_PATH),
-            make_vec_env("Ant-v5", n_envs=1, env_kwargs=ENV_KWARGS),
-        )
+        dummy = make_vec_env(ENV_ID, n_envs=1,
+                             env_kwargs=ENV_KWARGS if ENV_KWARGS else {})
+        normalizer = VecNormalize.load(str(VECNORM_PATH), dummy)
         normalizer.training = False
-        print("Loaded normalization statistics (evaluation mode).")
+        print("Loaded normalisation statistics (evaluation mode).")
     else:
-        print("No VecNormalize stats found — evaluating without normalization.")
+        print("No VecNormalize stats found — evaluating without normalisation.")
 
-    # Single env so we can read the info dict (which holds the x position).
-    env = gym.make("Ant-v5", **ENV_KWARGS)
+    env = gym.make(ENV_ID, **ENV_KWARGS)
 
-    rewards, lengths, distances = [], [], []
-    print(f"Evaluating over {N_EVAL_EPISODES} episodes...\n")
+    rewards, lengths, third_metric = [], [], []
+    print(f"\nRunning {N_EVAL_EPISODES} episodes...\n")
 
     for ep in range(N_EVAL_EPISODES):
         obs, info = env.reset()
-        start_x = info.get("x_position", 0.0)
+        start_x = info.get("x_position", None)
         total_reward, steps, last_x = 0.0, 0, start_x
+        step_rewards = []
 
         while True:
             model_obs = normalizer.normalize_obs(obs) if normalizer is not None else obs
             action, _ = model.predict(model_obs, deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += reward
+            step_rewards.append(reward)
             steps += 1
-            last_x = info.get("x_position", last_x)
+            if not IS_QUADRUPED:
+                last_x = info.get("x_position", last_x)
             if terminated or truncated:
                 break
 
-        distance = last_x - start_x
         rewards.append(total_reward)
         lengths.append(steps)
-        distances.append(distance)
-        print(f"  Episode {ep + 1:2d}:  reward {total_reward:7.1f}   "
-              f"length {steps:4d}   distance {distance:6.2f} m")
+
+        if IS_QUADRUPED:
+            # dm_control reward per step is in [0, 1].
+            # Mean per-step reward = average walking quality over the episode.
+            quality = float(np.mean(step_rewards))
+            third_metric.append(quality)
+            print(f"  Episode {ep + 1:2d}:  reward {total_reward:7.2f}   "
+                  f"length {steps:4d}   quality {quality:.3f}")
+        else:
+            distance = (last_x or 0.0) - (start_x or 0.0)
+            third_metric.append(distance)
+            print(f"  Episode {ep + 1:2d}:  reward {total_reward:7.1f}   "
+                  f"length {steps:4d}   distance {distance:6.2f} m")
 
     env.close()
 
-    print("\n" + "=" * 54)
-    print(f"  Mean reward:    {np.mean(rewards):8.1f}  (std {np.std(rewards):.1f})")
-    print(f"  Mean length:    {np.mean(lengths):8.1f}  steps")
-    print(f"  Mean distance:  {np.mean(distances):8.2f}  m  (std {np.std(distances):.2f})")
-    print("=" * 54)
-    print()
-    print("  Reading it:")
-    print("   - distance near 0  -> it is standing still, not walking")
-    print("   - distance large + length near max -> it is walking and stable")
+    print("\n" + "=" * 58)
+    print(f"  Mean reward:   {np.mean(rewards):9.2f}  (std {np.std(rewards):.2f})")
+    print(f"  Mean length:   {np.mean(lengths):9.1f}  steps")
+    if IS_QUADRUPED:
+        q = np.mean(third_metric)
+        print(f"  Mean quality:  {q:9.3f}  (0=fallen/still, 1=walking perfectly)")
+        print("=" * 58)
+        print()
+        print("  Reading it:")
+        print("   quality < 0.3  → barely moving or unstable")
+        print("   quality 0.3–0.7 → learning to walk, not yet fluent")
+        print("   quality > 0.7  → walking well at target speed")
+    else:
+        d = np.mean(third_metric)
+        print(f"  Mean distance: {d:9.2f}  m  (std {np.std(third_metric):.2f})")
+        print("=" * 58)
+        print()
+        print("  Reading it:")
+        print("   distance near 0  → standing still, not walking")
+        print("   distance large + length near max → walking and stable")
 
 
 if __name__ == "__main__":
