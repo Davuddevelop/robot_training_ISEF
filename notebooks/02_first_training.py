@@ -44,8 +44,15 @@ print()
 # make_vec_env creates N parallel copies of the environment.
 # More copies = more data per second = faster training.
 # We use 4 here — your CPU can handle 4 Ant simulations at once.
+#
+# monitor_dir: SB3 writes a small CSV file for each environment recording
+# the reward and length of every finished episode. This is the raw data
+# we turn into a learning-curve graph later (notebooks/04_plot_learning_curve.py).
+# Without this, the reward numbers scroll past the screen and are lost forever.
 n_envs = 4
-env = make_vec_env("Ant-v5", n_envs=n_envs)
+MONITOR_DIR = SAVE_DIR / "monitor_logs"
+MONITOR_DIR.mkdir(parents=True, exist_ok=True)
+env = make_vec_env("Ant-v5", n_envs=n_envs, monitor_dir=str(MONITOR_DIR))
 
 print(f"Environment created: {n_envs} parallel Ant simulations")
 print(f"Observation size: {env.observation_space.shape[0]} numbers")
