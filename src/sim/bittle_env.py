@@ -230,9 +230,13 @@ class BittleEnv(gym.Env):
     # ------------------------------------------------------------------ reward
     def _compute_reward(self, action):
         forward_velocity = float(self._mj_data.qvel[FORWARD_AXIS])
+        lateral_velocity = float(self._mj_data.qvel[0])   # X axis = sideways
 
         reward = REWARD["forward_velocity_coeff"] * forward_velocity
         reward += REWARD["alive_bonus"]
+
+        # Lateral drift: squared so small drifts are cheap, large crab-walks are costly.
+        reward += REWARD["lateral_velocity_penalty"] * lateral_velocity ** 2
 
         # Tilt penalty: how far from upright are we? (angle between body-up and world-up)
         tilt_angle = np.arccos(np.clip(self._uprightness(), -1.0, 1.0))

@@ -81,6 +81,13 @@ REWARD = {
     # 0.36 m but fell after 70 of 500 steps when this was only 0.1).
     "alive_bonus": 0.5,
 
+    # Negative: penalty for drifting sideways (lateral = X axis, not forward Y).
+    # Without this the policy sometimes crab-walks to one side rather than going
+    # straight forward, which looks bad and performs worse on real flat ground.
+    # Coefficient scales the SQUARED lateral speed, so small drifts barely matter
+    # but large crab-walk is strongly penalised.
+    "lateral_velocity_penalty": -0.5,
+
     # Negative: penalty if the robot tilts too much.
     # Applied when roll or pitch exceeds this threshold (radians).
     "tilt_threshold": 0.5,       # ~28 degrees
