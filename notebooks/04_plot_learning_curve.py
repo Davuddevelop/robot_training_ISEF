@@ -32,8 +32,8 @@ from stable_baselines3.common.monitor import load_results
 from stable_baselines3.common.results_plotter import ts2xy
 
 # Switch run with env var, e.g.:  $env:ANT_RUN_NAME="ant_v3"
-# Runs: ant_first_run, ant_improved, ant_v2, ant_v3
-RUN_NAME = os.environ.get("ANT_RUN_NAME", "ant_v2")
+# Runs: bittle_v1, ant_first_run, ant_improved, ant_v2, ant_v3
+RUN_NAME = os.environ.get("ANT_RUN_NAME", "bittle_v1")
 
 RUN_DIR = pathlib.Path(__file__).parent.parent / "models" / RUN_NAME
 MONITOR_DIR = RUN_DIR / "monitor_logs"
@@ -88,7 +88,7 @@ def main():
 
     plt.xlabel("Training steps (experience collected)")
     plt.ylabel("Episode reward (how good the agent is)")
-    plt.title("Ant — Learning Curve")
+    plt.title(f"{RUN_NAME} — Learning Curve")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
