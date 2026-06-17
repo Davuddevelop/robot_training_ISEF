@@ -218,6 +218,56 @@ PPO = {
 }
 
 # ---------------------------------------------------------------------------
+# HARDWARE SETTINGS (Phase 3 — real robot)
+# ---------------------------------------------------------------------------
+
+HARDWARE = {
+    # USB serial port the NyBoard appears on.
+    # Windows: check Device Manager → Ports (COM & LPT) after plugging in.
+    # Typical values: "COM3", "COM5", "COM7"
+    "serial_port": "COM3",
+    "baud_rate": 115200,
+
+    # Control loop rate for real hardware — must match CONTROL_TIMESTEP above.
+    "control_hz": 50,
+
+    # Tilt angle (radians) at which we cut power and stand still.
+    # Same as fall_angle in sim so the policy's experience matches hardware.
+    "fall_stop_angle": 0.8,
+
+    # How long to wait for an IMU response before giving up (seconds).
+    "imu_timeout_s": 0.005,
+}
+
+# ---------------------------------------------------------------------------
+# SERVO CALIBRATION (Phase 3 — must be verified on real hardware)
+# ---------------------------------------------------------------------------
+
+CALIBRATION = {
+    # NyBoard slot number for each of our 8 simulated joints.
+    # Our sim order: [lb_shoulder, lb_knee, lf_shoulder, lf_knee,
+    #                 rb_shoulder, rb_knee, rf_shoulder, rf_knee]
+    # Standard Bittle wiring (verify against your physical robot):
+    #   Slot 8 = LF shoulder,  9 = RF shoulder, 10 = LB shoulder, 11 = RB shoulder
+    #   Slot 12 = LF knee,    13 = RF knee,    14 = LB knee,     15 = RB knee
+    "servo_slots": [10, 14, 8, 12, 11, 15, 9, 13],
+
+    # +1 if sim-positive rotation = servo-positive, -1 if reversed.
+    # Verify by commanding +0.3 rad to each joint one at a time and watching
+    # which direction the limb moves vs. what the sim shows.
+    "direction_signs": [1, -1, 1, -1, -1, 1, -1, 1],
+
+    # Per-servo trim in degrees, added after all other conversions.
+    # Start at 0. If the robot stands but leans sideways, tweak individual
+    # trims here rather than touching the main calibration.
+    "trim_deg": [0, 0, 0, 0, 0, 0, 0, 0],
+
+    # Hard limit on how far any joint can deviate from neutral (degrees).
+    # Prevents hardware damage from bad policy outputs.
+    "max_joint_offset_deg": 45,
+}
+
+# ---------------------------------------------------------------------------
 # PATHS
 # ---------------------------------------------------------------------------
 

@@ -10,3 +10,4 @@ stable-baselines3
 # Utilities
 numpy
 onnxruntime      # for exporting trained policy to run on the Raspberry Pi
+pyserial         # serial communication with the NyBoard (real robot)
