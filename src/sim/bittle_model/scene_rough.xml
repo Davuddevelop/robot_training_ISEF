@@ -1,0 +1,85 @@
+<!--
+  scene_rough.xml — Bittle simulation scene with UNEVEN (heightfield) terrain.
+
+  This is OUR core research scene. It is identical to scene.xml EXCEPT the flat
+  floor is replaced by a HEIGHTFIELD: a grid of ground-height values that make
+  bumpy terrain. Everything else — the robot body, the 8 servos, the sensors,
+  the home pose — is exactly the same, so any difference in the robot's
+  behaviour comes from the TERRAIN alone (a clean experimental control).
+
+  HOW THE HEIGHTFIELD WORKS
+    - <hfield> below declares a grid: nrow x ncol cells over a size area.
+    - We initialise it flat (all heights = 0). The XML is just the empty grid.
+    - At every episode reset, bittle_env.py FILLS this grid with random bumps,
+      scaled by the current terrain_difficulty (0.0 = flat, 1.0 = max rough).
+    - So the difficulty is controlled from Python, not hard-coded here.
+
+  size = (radius_x, radius_y, z_top, z_base):
+    radius_x/y : half-width of the terrain patch in metres (2.0 => 4m x 4m).
+    z_top      : the MAXIMUM bump height in metres when a cell value = 1.0.
+                 Our Python code writes values in [0,1], so this caps how tall
+                 the tallest possible bump is (0.06 m ~ 6 cm, big for a 12cm dog).
+    z_base     : how far the solid ground extends downward (0.1 m is plenty).
+-->
+<mujoco model="bittle_scene_rough">
+  <include file="bittle_body.xml"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <statistic center="0 0 0.05" extent="0.4"/>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1=".1 .2 .3" rgb2=".2 .3 .4"
+             width="300" height="300"/>
+    <material name="grid" texture="grid" texrepeat="8 8" reflectance="0.2"/>
+
+    <!-- The heightfield grid. 64x64 cells over a 4m x 4m patch.
+         Initialised flat; bittle_env.py paints the bumps at each reset. -->
+    <hfield name="rough" nrow="64" ncol="64" size="2.0 2.0 0.06 0.1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <!-- Ground is now the heightfield, not a flat plane. -->
+    <geom name="floor" type="hfield" hfield="rough" material="grid"
+          friction="0.8 0.02 0.01"/>
+  </worldbody>
+
+  <!-- 8 servos: command = target joint angle (radians). Identical to scene.xml. -->
+  <actuator>
+    <position name="lb_shoulder" joint="left-back-shoulder-joint"   kp="20" ctrlrange="-1.5708 1.6"     forcerange="-0.55 0.55"/>
+    <position name="lb_knee"     joint="left-back-knee-joint"       kp="20" ctrlrange="-1.22173 1.48353" forcerange="-0.55 0.55"/>
+    <position name="lf_shoulder" joint="left-front-shoulder-joint"  kp="20" ctrlrange="-1.5708 1.6"     forcerange="-0.55 0.55"/>
+    <position name="lf_knee"     joint="left-front-knee-joint"      kp="20" ctrlrange="-1.22173 1.48353" forcerange="-0.55 0.55"/>
+    <position name="rb_shoulder" joint="right-back-shoulder-joint"  kp="20" ctrlrange="-1.5708 1.6"     forcerange="-0.55 0.55"/>
+    <position name="rb_knee"     joint="right-back-knee-joint"       kp="20" ctrlrange="-1.22173 1.48353" forcerange="-0.55 0.55"/>
+    <position name="rf_shoulder" joint="right-front-shoulder-joint" kp="20" ctrlrange="-1.5708 1.6"     forcerange="-0.55 0.55"/>
+    <position name="rf_knee"     joint="right-front-knee-joint"     kp="20" ctrlrange="-1.22173 1.48353" forcerange="-0.55 0.55"/>
+  </actuator>
+
+  <!-- Sensors matching the observation design in CLAUDE.md §7. Identical to scene.xml. -->
+  <sensor>
+    <framequat   name="orientation"      objtype="site" objname="imu"/>
+    <gyro        name="angular_velocity" site="imu"/>
+    <framepos    name="torso_pos"        objtype="site" objname="imu"/>
+    <velocimeter name="torso_vel"        site="imu"/>
+
+    <jointpos name="lb_shoulder_angle" joint="left-back-shoulder-joint"/>
+    <jointpos name="lb_knee_angle"     joint="left-back-knee-joint"/>
+    <jointpos name="lf_shoulder_angle" joint="left-front-shoulder-joint"/>
+    <jointpos name="lf_knee_angle"     joint="left-front-knee-joint"/>
+    <jointpos name="rb_shoulder_angle" joint="right-back-shoulder-joint"/>
+    <jointpos name="rb_knee_angle"     joint="right-back-knee-joint"/>
+    <jointpos name="rf_shoulder_angle" joint="right-front-shoulder-joint"/>
+    <jointpos name="rf_knee_angle"     joint="right-front-knee-joint"/>
+  </sensor>
+
+  <keyframe>
+    <!-- Start slightly higher (0.10 m vs 0.085) so the robot spawns ABOVE the
+         tallest possible bump instead of inside it. 7 freejoint + 8 leg joints. -->
+    <key name="home" qpos="0 0 0.10  1 0 0 0  0.56 0.56 0.56 0.56 0.56 0.56 0.56 0.56"/>
+  </keyframe>
+</mujoco>
