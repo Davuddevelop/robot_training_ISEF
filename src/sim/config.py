@@ -161,6 +161,43 @@ DOMAIN_RAND = {
 }
 
 # ---------------------------------------------------------------------------
+# TERRAIN (the core research variable: flat vs. uneven ground)
+# This is what justifies using RL at all — the stock gait handles flat ground,
+# but fails on the uneven terrain the RL policy learns to cross.
+# ---------------------------------------------------------------------------
+
+TERRAIN = {
+    # The heightfield grid in scene_rough.xml is filled with random bumps at
+    # every reset, scaled by the current difficulty (0.0 = flat, 1.0 = max).
+    # "difficulty" here is the DEFAULT for a fixed-difficulty run; the training
+    # curriculum overrides it and raises it automatically as the robot improves.
+    "difficulty": 0.5,
+
+    # The tallest possible bump (metres) at difficulty 1.0. Must match z_top in
+    # scene_rough.xml's <hfield size="... z_top ...">. The Bittle is ~12 cm tall,
+    # so 0.06 m (6 cm) bumps are genuinely hard terrain for it.
+    "max_bump_height": 0.06,
+
+    # Smoothness of the bumps. We generate low-resolution noise and smooth it so
+    # the ground has rolling bumps, not a spiky bed of nails (which is both
+    # unrealistic and unlearnable). Higher = smoother, gentler slopes.
+    "smoothing_passes": 2,
+
+    # --- Curriculum (used by the training callback) ---
+    # Start flat, raise difficulty when the robot walks well, cap at max.
+    "curriculum": {
+        "enabled": True,
+        "start_difficulty": 0.0,       # begin on flat ground
+        "max_difficulty": 1.0,         # hardest terrain to reach
+        "step": 0.1,                   # how much to raise difficulty each time
+        # Raise difficulty when the mean forward distance (metres) over the
+        # last evaluation exceeds this. Tuned so the robot must actually walk
+        # across the current terrain before it gets harder.
+        "promote_distance": 0.8,
+    },
+}
+
+# ---------------------------------------------------------------------------
 # SIMULATION SETTINGS
 # ---------------------------------------------------------------------------
 
@@ -282,5 +319,6 @@ import pathlib
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
 BITTLE_MODEL_PATH = PROJECT_ROOT / "src" / "sim" / "bittle_model" / "scene.xml"
+BITTLE_ROUGH_MODEL_PATH = PROJECT_ROOT / "src" / "sim" / "bittle_model" / "scene_rough.xml"
 MODELS_DIR = PROJECT_ROOT / "models"
 DATA_DIR = PROJECT_ROOT / "data"

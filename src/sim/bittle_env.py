@@ -20,9 +20,9 @@ import mujoco
 
 from src.sim.config import (
     OBS_DIM, ACTION_DIM, ACTION_LIMIT,
-    NEUTRAL_POSE, REWARD, DOMAIN_RAND,
+    NEUTRAL_POSE, REWARD, DOMAIN_RAND, TERRAIN,
     SIM_TIMESTEP, CONTROL_TIMESTEP, EPISODE_LENGTH_STEPS,
-    BITTLE_MODEL_PATH,
+    BITTLE_MODEL_PATH, BITTLE_ROUGH_MODEL_PATH,
 )
 
 # The model faces +Y, so forward progress is movement along the world Y axis.
@@ -34,17 +34,28 @@ class BittleEnv(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, render_mode=None, domain_rand=False):
+    def __init__(self, render_mode=None, domain_rand=False, terrain=False,
+                 terrain_difficulty=None):
         """
         Args:
             render_mode: "human" opens a viewer window; None = headless (faster).
             domain_rand: if True, randomizes physics each episode (for the
                          robustness experiments). Default False = clean baseline,
                          which is also experimental condition (1) "no randomization".
+            terrain: if True, load the heightfield scene (scene_rough.xml) and
+                     generate uneven ground each episode. False = flat scene.xml
+                     (the experimental control).
+            terrain_difficulty: 0.0 = flat, 1.0 = max bumps. If None, uses
+                     TERRAIN["difficulty"] from config. The training curriculum
+                     overrides this via set_terrain_difficulty().
         """
         super().__init__()
         self.render_mode = render_mode
         self.domain_rand = domain_rand
+        self.terrain = terrain
+        self._terrain_difficulty = (
+            TERRAIN["difficulty"] if terrain_difficulty is None else terrain_difficulty
+        )
 
         # --- Spaces (the contract with SB3) ---
         self.observation_space = spaces.Box(
@@ -56,10 +67,18 @@ class BittleEnv(gym.Env):
             low=-1.0, high=1.0, shape=(ACTION_DIM,), dtype=np.float32
         )
 
-        # --- Load the MuJoCo model (our scene.xml: body + servos + sensors) ---
-        self._mj_model = mujoco.MjModel.from_xml_path(str(BITTLE_MODEL_PATH))
+        # --- Load the MuJoCo model. Rough scene has the heightfield; flat does not. ---
+        model_path = BITTLE_ROUGH_MODEL_PATH if terrain else BITTLE_MODEL_PATH
+        self._mj_model = mujoco.MjModel.from_xml_path(str(model_path))
         self._mj_model.opt.timestep = SIM_TIMESTEP
         self._mj_data = mujoco.MjData(self._mj_model)
+
+        # Heightfield bookkeeping (only when terrain is on).
+        if self.terrain:
+            self._hfield_id = mujoco.mj_name2id(
+                self._mj_model, mujoco.mjtObj.mjOBJ_HFIELD, "rough")
+            self._hfield_nrow = int(self._mj_model.hfield_nrow[self._hfield_id])
+            self._hfield_ncol = int(self._mj_model.hfield_ncol[self._hfield_id])
 
         # How many physics steps make one control step (0.02 / 0.002 = 10).
         self._n_substeps = int(round(CONTROL_TIMESTEP / SIM_TIMESTEP))
@@ -115,6 +134,80 @@ class BittleEnv(gym.Env):
         """xmat[8] = how aligned the body-up axis is with world-up. 1.0 = perfectly upright."""
         return float(self._mj_data.xmat[self._root_id][8])
 
+    # ------------------------------------------------------------------ terrain
+    def set_terrain_difficulty(self, difficulty):
+        """
+        Set the terrain difficulty (0.0 = flat, 1.0 = max bumps).
+
+        The training curriculum calls this to make the ground harder as the
+        robot improves. Takes effect on the NEXT reset (bumps regenerate then).
+        """
+        self._terrain_difficulty = float(np.clip(difficulty, 0.0, 1.0))
+
+    def get_terrain_difficulty(self):
+        return self._terrain_difficulty
+
+    def _generate_terrain(self):
+        """
+        Fill the heightfield grid with fresh random bumps for this episode.
+
+        Steps:
+          1. Draw random noise in [0, 1] for each of the nrow x ncol cells.
+          2. Smooth it a few times so we get rolling bumps, not sharp spikes
+             (a spiky field is unrealistic and impossible to learn on).
+          3. Scale by terrain_difficulty: 0.0 wipes it flat, 1.0 = full height.
+          4. Flatten a spawn patch at the centre so the robot starts on level
+             ground and doesn't topple before it can take a step.
+          5. Write the grid into the model and push it to the renderer.
+
+        MuJoCo stores hfield_data as values in [0, 1]; the actual bump height in
+        metres is that value times z_top (set in scene_rough.xml).
+        """
+        nrow, ncol = self._hfield_nrow, self._hfield_ncol
+
+        # 1. Random noise.
+        field = self.np_random.uniform(0.0, 1.0, size=(nrow, ncol))
+
+        # 2. Smooth with a simple neighbour-average blur, a few passes.
+        for _ in range(TERRAIN["smoothing_passes"]):
+            field = self._smooth(field)
+
+        # Re-normalise to [0, 1] after smoothing (blur shrinks the range).
+        field -= field.min()
+        if field.max() > 1e-8:
+            field /= field.max()
+
+        # 3. Scale by difficulty.
+        field *= self._terrain_difficulty
+
+        # 4. Flatten a spawn patch at the grid centre (robot starts here).
+        cr, cc = nrow // 2, ncol // 2
+        pad = max(2, nrow // 12)
+        field[cr - pad:cr + pad, cc - pad:cc + pad] = 0.0
+
+        # 5. Write to the model. hfield_data is a flat (nrow*ncol,) array.
+        adr = int(self._mj_model.hfield_adr[self._hfield_id])
+        self._mj_model.hfield_data[adr:adr + nrow * ncol] = field.flatten().astype(np.float32)
+
+        # Push updated terrain to the viewer if one is open.
+        if self._viewer is not None:
+            try:
+                mujoco.mjr_uploadHField(self._mj_model, self._viewer._sim.context,
+                                        self._hfield_id)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _smooth(field):
+        """Average each cell with its 4 neighbours (a cheap blur, edges clamped)."""
+        out = field.copy()
+        out[1:-1, 1:-1] = (
+            field[1:-1, 1:-1]
+            + field[:-2, 1:-1] + field[2:, 1:-1]
+            + field[1:-1, :-2] + field[1:-1, 2:]
+        ) / 5.0
+        return out
+
     # ------------------------------------------------------------------ reset
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -124,6 +217,11 @@ class BittleEnv(gym.Env):
         self._prev_action_for_obs = np.zeros(ACTION_DIM)
         self._last_command = self._neutral.copy()
         self._gait_phase = 0.0
+
+        # Generate fresh uneven terrain for this episode (if terrain is on).
+        # Done before resetting the robot so it spawns onto the new ground.
+        if self.terrain:
+            self._generate_terrain()
 
         # Start from the home keyframe (neutral standing pose).
         mujoco.mj_resetDataKeyframe(self._mj_model, self._mj_data, self._home_key)
@@ -201,6 +299,7 @@ class BittleEnv(gym.Env):
             "forward_velocity": forward_velocity,
             "forward_position": float(self._mj_data.qpos[FORWARD_AXIS]),
             "height": float(self._mj_data.qpos[2]),
+            "terrain_difficulty": self._terrain_difficulty,
         }
 
         if self.render_mode == "human":
