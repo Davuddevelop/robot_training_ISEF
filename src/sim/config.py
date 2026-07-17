@@ -205,7 +205,15 @@ TERRAIN = {
         # Raise difficulty when the mean forward distance (metres) over the
         # last evaluation exceeds this. Tuned so the robot must actually walk
         # across the current terrain before it gets harder.
-        "promote_distance": 0.8,
+        #
+        # RECALIBRATED (was 0.8): a run spent its entire 5M-step budget stuck
+        # at difficulty 0.1, plateauing around 0.5m stable distance. 0.8m is
+        # close to the BEST fixed-gait performance on perfectly flat ground
+        # (~1.1m) -- an unreasonable bar to clear before the robot is even
+        # allowed to see harder terrain. Lowered so the curriculum actually
+        # progresses through difficulty levels, since exposure to a RANGE of
+        # terrain is the point, not maximizing performance at each rung.
+        "promote_distance": 0.4,
     },
 }
 
