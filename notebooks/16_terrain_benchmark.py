@@ -42,8 +42,15 @@ N_EPISODES   = 10          # episodes per controller per difficulty (rule: >=10 
 RUN_NAME     = "bittle_terrain"
 ROOT         = pathlib.Path(__file__).parent.parent
 SAVE_DIR     = ROOT / "models" / RUN_NAME
-MODEL_PATH   = SAVE_DIR / f"{RUN_NAME}_model"
-VECNORM_PATH = SAVE_DIR / "vecnormalize.pkl"
+# Prefer best_model (highest distance seen during training) over the final
+# model — PPO can degrade late in training, so "final" is not always "best".
+# Same preference 18_watch_bittle_terrain.py already uses.
+MODEL_PATH   = SAVE_DIR / "best_model"
+VECNORM_PATH = SAVE_DIR / "best_vecnormalize.pkl"
+_FINAL_MODEL_PATH   = SAVE_DIR / f"{RUN_NAME}_model"
+_FINAL_VECNORM_PATH = SAVE_DIR / "vecnormalize.pkl"
+if not (MODEL_PATH.with_suffix(".zip").exists() and VECNORM_PATH.exists()):
+    MODEL_PATH, VECNORM_PATH = _FINAL_MODEL_PATH, _FINAL_VECNORM_PATH
 DATA_DIR     = ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -120,7 +127,8 @@ def main():
     if MODEL_PATH.with_suffix(".zip").exists() and VECNORM_PATH.exists():
         from stable_baselines3 import PPO
         from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-        print(f"Loading RL policy: {RUN_NAME}")
+        which = "best_model" if MODEL_PATH.name == "best_model" else "final model"
+        print(f"Loading RL policy: {RUN_NAME} ({which})")
         model = PPO.load(str(MODEL_PATH))
         norm  = VecNormalize.load(str(VECNORM_PATH),
                                   DummyVecEnv([lambda: BittleEnv(terrain=True)]))
