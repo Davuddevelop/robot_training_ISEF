@@ -183,6 +183,18 @@ TERRAIN = {
     # unrealistic and unlearnable). Higher = smoother, gentler slopes.
     "smoothing_passes": 2,
 
+    # Discrete rubble/debris chunks scattered on top of the rolling ground —
+    # this is what makes the terrain read as "destroyed house" rubble rather
+    # than plain hills, and gives the robot actual obstacles to step over.
+    # We deliberately do NOT make the heightfield itself spiky (sharp cliffs
+    # make MuJoCo contacts unstable) — discrete boxes are the safer way to add
+    # real difficulty. Count and size both scale with terrain_difficulty.
+    "debris": {
+        "enabled": True,
+        "max_count": 14,            # number of chunks placed at difficulty 1.0
+        "size_range": (0.02, 0.05), # half-extent per axis, metres (2-5 cm chunks)
+    },
+
     # --- Curriculum (used by the training callback) ---
     # Start flat, raise difficulty when the robot walks well, cap at max.
     "curriculum": {

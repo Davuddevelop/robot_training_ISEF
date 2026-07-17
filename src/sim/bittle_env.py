@@ -79,6 +79,19 @@ class BittleEnv(gym.Env):
                 self._mj_model, mujoco.mjtObj.mjOBJ_HFIELD, "rough")
             self._hfield_nrow = int(self._mj_model.hfield_nrow[self._hfield_id])
             self._hfield_ncol = int(self._mj_model.hfield_ncol[self._hfield_id])
+            self._hfield_radius_x = float(self._mj_model.hfield_size[self._hfield_id][0])
+            self._hfield_radius_y = float(self._mj_model.hfield_size[self._hfield_id][1])
+
+            # Debris (rubble) geoms declared in scene_rough.xml: debris_0..debris_N-1.
+            # We look each one up by name once here; every reset just repositions them.
+            self._debris_ids = []
+            i = 0
+            while True:
+                gid = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, f"debris_{i}")
+                if gid == -1:
+                    break
+                self._debris_ids.append(gid)
+                i += 1
 
         # How many physics steps make one control step (0.02 / 0.002 = 10).
         self._n_substeps = int(round(CONTROL_TIMESTEP / SIM_TIMESTEP))
@@ -196,6 +209,61 @@ class BittleEnv(gym.Env):
                                         self._hfield_id)
             except Exception:
                 pass
+
+        # Scatter rubble chunks on top — this is what gives "destroyed house"
+        # terrain its actual obstacles, not just rolling ground. Uses the same
+        # (pre-flatten) height grid so chunks rest roughly on the surface.
+        if TERRAIN["debris"]["enabled"] and self._debris_ids:
+            self._place_debris(field)
+
+    def _place_debris(self, field):
+        """
+        Scatter rubble chunks onto the terrain (or hide them, if not needed).
+
+        Count and size both scale with terrain_difficulty — 0 chunks at
+        difficulty 0.0 (flat baseline stays a clean experimental control),
+        up to config["max_count"] chunks at difficulty 1.0. Chunks not in use
+        this episode are parked far away, underground, so they can't be
+        touched or seen.
+
+        Each active chunk gets a random (x, y) on the terrain patch — away
+        from the flattened spawn area so the robot always starts clear — and
+        its height is read off the SAME height grid we just generated, so it
+        rests roughly on the ground instead of floating or clipping through it.
+        """
+        cfg = TERRAIN["debris"]
+        active = int(round(self._terrain_difficulty * cfg["max_count"]))
+        size_lo, size_hi = cfg["size_range"]
+        rx, ry = self._hfield_radius_x, self._hfield_radius_y
+        nrow, ncol = field.shape
+        max_bump = TERRAIN["max_bump_height"]
+        spawn_clear_radius = 0.3  # metres — keep clear of the robot's start point
+
+        for idx, gid in enumerate(self._debris_ids):
+            if idx >= active:
+                # Not needed this episode: hide it far away, underground.
+                self._mj_model.geom_pos[gid] = [50.0 + idx, 0.0, -5.0]
+                continue
+
+            # Random (x, y), resampling a few times to avoid the spawn patch.
+            x, y = 0.0, 0.0
+            for _attempt in range(8):
+                x = self.np_random.uniform(-rx * 0.85, rx * 0.85)
+                y = self.np_random.uniform(-ry * 0.85, ry * 0.85)
+                if np.hypot(x, y) > spawn_clear_radius:
+                    break
+
+            # Sample this episode's terrain height under (x, y) so the chunk
+            # sits on the ground rather than floating above or buried below it.
+            col = int(np.clip((x / rx + 1.0) / 2.0 * (ncol - 1), 0, ncol - 1))
+            row = int(np.clip((y / ry + 1.0) / 2.0 * (nrow - 1), 0, nrow - 1))
+            ground_z = float(field[row, col]) * max_bump
+
+            half_extents = self.np_random.uniform(size_lo, size_hi, size=3)
+            half_extents[2] = min(half_extents[2], 0.03)  # keep chunks step-over-able
+
+            self._mj_model.geom_size[gid] = half_extents
+            self._mj_model.geom_pos[gid] = [x, y, ground_z + half_extents[2]]
 
     @staticmethod
     def _smooth(field):
