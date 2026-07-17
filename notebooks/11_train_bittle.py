@@ -52,6 +52,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from src.sim.bittle_env import BittleEnv
 from src.sim.config import PPO as PPO_CFG
+from src.sim.config import EPISODE_LENGTH_STEPS
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION  (override with environment variables)
@@ -147,33 +148,46 @@ class BestDistanceCallback(BaseCallback):
             return True
         self._last_eval = self.num_timesteps
 
-        distances = []
+        distances, falls = [], 0
         for _ in range(self._n_eval):
             raw_obs   = self._raw_env.reset()
             start_y   = None
             done      = [False]
+            steps     = 0
             while not done[0]:
                 # Normalize using the TRAINING env's running statistics.
                 norm_obs = self.training_env.normalize_obs(raw_obs)
                 action, _ = self.model.predict(norm_obs, deterministic=True)
                 raw_obs, _, done, infos = self._raw_env.step(action)
+                steps += 1
                 if start_y is None:
                     start_y = infos[0].get("forward_position", 0.0)
                 last_y = infos[0].get("forward_position", 0.0)
             distances.append(last_y - (start_y or 0.0))
+            if steps < EPISODE_LENGTH_STEPS:
+                falls += 1
 
         mean_dist = float(np.mean(distances))
+        fall_rate = falls / self._n_eval
+        # Require most eval episodes to survive the full episode before we
+        # trust this distance -- otherwise a policy that lunges forward and
+        # falls near the end can look like "best" by distance alone (this
+        # happened during flat-ground tuning: 0.36m distance, fell at 70/500
+        # steps). See RUN_GUIDE.md.
+        stable = fall_rate <= 0.5
+
         marker = ""
-        if mean_dist > self._best_dist:
+        if stable and mean_dist > self._best_dist:
             self._best_dist = mean_dist
             self.model.save(str(self._save_dir / "best_model"))
             self.training_env.save(str(self._save_dir / "best_vecnormalize.pkl"))
             marker = "  ← NEW BEST, saved"
 
         if self.verbose:
+            stability_note = "" if stable else "  [UNSTABLE -- not counted]"
             print(f"\n  [Best-model eval @ {self.num_timesteps:,} steps]  "
-                  f"distance: {mean_dist:.3f} m  "
-                  f"(best: {self._best_dist:.3f} m){marker}\n")
+                  f"distance: {mean_dist:.3f} m  fall_rate: {fall_rate:.2f}  "
+                  f"(best: {self._best_dist:.3f} m){marker}{stability_note}\n")
         return True
 
     def _on_training_end(self):

@@ -59,7 +59,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from src.sim.bittle_env import BittleEnv
 from src.sim.config import PPO as PPO_CFG
-from src.sim.config import TERRAIN
+from src.sim.config import TERRAIN, EPISODE_LENGTH_STEPS
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -182,36 +182,56 @@ class TerrainCurriculumCallback(BaseCallback):
             json.dump({"difficulty": self._difficulty, "best_dist": self._best_dist}, f)
 
     def _evaluate_distance(self):
-        distances = []
+        """
+        Returns (mean_distance, fall_rate).
+
+        A policy can score high mean distance by lunging forward and toppling
+        near the end of the episode -- distance alone can't tell that apart
+        from genuine stable walking (we saw exactly this on flat ground months
+        ago: a run scored well on distance but fell at 70/500 steps). So we
+        also track fall_rate: an episode "falls" if it ends before reaching
+        EPISODE_LENGTH_STEPS (the only way an episode ends early is _is_fallen
+        triggering termination -- reaching the step limit is truncation, not
+        a fall).
+        """
+        distances, falls = [], 0
         for _ in range(self._n_eval):
             raw_obs = self._eval_env.reset()
-            start_y, last_y, done = None, 0.0, [False]
+            start_y, last_y, done, steps = None, 0.0, [False], 0
             while not done[0]:
                 norm_obs = self.training_env.normalize_obs(raw_obs)
                 action, _ = self.model.predict(norm_obs, deterministic=True)
                 raw_obs, _, done, infos = self._eval_env.step(action)
+                steps += 1
                 if start_y is None:
                     start_y = infos[0].get("forward_position", 0.0)
                 last_y = infos[0].get("forward_position", 0.0)
             distances.append(last_y - (start_y or 0.0))
-        return float(np.mean(distances))
+            if steps < EPISODE_LENGTH_STEPS:
+                falls += 1
+        return float(np.mean(distances)), falls / self._n_eval
 
     def _on_step(self) -> bool:
         if self.num_timesteps - self._last_eval < self._eval_freq:
             return True
         self._last_eval = self.num_timesteps
 
-        mean_dist = self._evaluate_distance()
+        mean_dist, fall_rate = self._evaluate_distance()
+        # Require the MAJORITY of eval episodes to survive the full episode
+        # before we trust this distance number at all. Otherwise a policy
+        # that lunges forward and falls near the end can look like "best" by
+        # distance alone, even though it never walks stably.
+        stable = fall_rate <= 0.5
 
         best_marker = ""
-        if mean_dist > self._best_dist:
+        if stable and mean_dist > self._best_dist:
             self._best_dist = mean_dist
             self.model.save(str(self._save_dir / "best_model"))
             self.training_env.save(str(self._save_dir / "best_vecnormalize.pkl"))
             best_marker = "  ← new best, saved"
 
         promoted = ""
-        if (CUR["enabled"]
+        if (CUR["enabled"] and stable
                 and mean_dist >= CUR["promote_distance"]
                 and self._difficulty < CUR["max_difficulty"]):
             new_d = self._set_all_difficulty(self._difficulty + CUR["step"])
@@ -220,10 +240,11 @@ class TerrainCurriculumCallback(BaseCallback):
         self._save_state()   # persist difficulty + best_dist so a resume picks these up
 
         if self.verbose:
+            stability_note = "" if stable else "  [UNSTABLE -- not counted]"
             print(f"\n  [Curriculum @ {self.num_timesteps:,} steps]  "
                   f"difficulty {self._difficulty:.2f}  |  "
-                  f"distance {mean_dist:.3f} m  "
-                  f"(best {self._best_dist:.3f}){best_marker}{promoted}\n")
+                  f"distance {mean_dist:.3f} m  fall_rate {fall_rate:.2f}  "
+                  f"(best {self._best_dist:.3f}){best_marker}{promoted}{stability_note}\n")
         return True
 
     def _on_training_end(self):
