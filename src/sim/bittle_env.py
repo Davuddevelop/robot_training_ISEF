@@ -166,8 +166,11 @@ class BittleEnv(gym.Env):
 
         Steps:
           1. Draw random noise in [0, 1] for each of the nrow x ncol cells.
-          2. Smooth it a few times so we get rolling bumps, not sharp spikes
-             (a spiky field is unrealistic and impossible to learn on).
+          2. Smooth it — FEWER passes as difficulty rises, so easy/early
+             terrain is gentle rolling ground (learnable warmup) and hard/late
+             terrain is genuinely jagged rock (less blur = sharper, more
+             irregular surface). At difficulty 0 the smoothing choice doesn't
+             matter anyway (step 3 zeroes it out).
           3. Scale by terrain_difficulty: 0.0 wipes it flat, 1.0 = full height.
           4. Flatten a spawn patch at the centre so the robot starts on level
              ground and doesn't topple before it can take a step.
@@ -181,8 +184,12 @@ class BittleEnv(gym.Env):
         # 1. Random noise.
         field = self.np_random.uniform(0.0, 1.0, size=(nrow, ncol))
 
-        # 2. Smooth with a simple neighbour-average blur, a few passes.
-        for _ in range(TERRAIN["smoothing_passes"]):
+        # 2. Smooth with a simple neighbour-average blur. Passes shrink as
+        # difficulty climbs: max difficulty gets ZERO smoothing (raw noise —
+        # a genuinely jagged, rocky texture), difficulty 0 gets full smoothing
+        # (doesn't matter, step 3 zeroes it anyway).
+        passes = round(TERRAIN["smoothing_passes"] * (1.0 - self._terrain_difficulty))
+        for _ in range(passes):
             field = self._smooth(field)
 
         # Re-normalise to [0, 1] after smoothing (blur shrinks the range).

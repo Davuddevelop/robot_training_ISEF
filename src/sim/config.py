@@ -178,10 +178,10 @@ TERRAIN = {
     # so 0.06 m (6 cm) bumps are genuinely hard terrain for it.
     "max_bump_height": 0.06,
 
-    # Smoothness of the bumps. We generate low-resolution noise and smooth it so
-    # the ground has rolling bumps, not a spiky bed of nails (which is both
-    # unrealistic and unlearnable). Higher = smoother, gentler slopes.
-    "smoothing_passes": 2,
+    # Smoothness of the bumps AT DIFFICULTY 0 (bittle_env.py scales this down to
+    # ZERO smoothing at difficulty 1.0, so the terrain goes from gentle rolling
+    # ground at the start of the curriculum to genuinely jagged rock at the end).
+    "smoothing_passes": 3,
 
     # Discrete rubble/debris chunks scattered on top of the rolling ground —
     # this is what makes the terrain read as "destroyed house" rubble rather
