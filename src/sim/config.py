@@ -105,6 +105,18 @@ REWARD = {
     # Episode ends (robot "falls") if tilt exceeds this angle (radians).
     # ~45 degrees — if the robot tips this far, it has fallen.
     "fall_angle": 0.8,
+
+    # Negative: ONE-TIME penalty applied the instant the robot actually falls
+    # (in addition to losing all remaining alive_bonus + forward reward for the
+    # rest of the episode). This is REWARD HACKING insurance: without it, a
+    # policy that sprints recklessly and falls near the end can still out-score
+    # a policy that walks carefully and survives, because falling only costs
+    # "future" reward, never actual banked reward. We saw exactly this: a run
+    # was crowned "best" at 0.846m distance despite falling in most episodes.
+    # This penalty makes falling COST something concrete, not just forfeit
+    # potential future gains, so "walk carefully, survive" clearly beats
+    # "sprint and risk it" in expectation.
+    "fall_penalty": -30.0,
 }
 
 # ---------------------------------------------------------------------------

@@ -364,6 +364,13 @@ class BittleEnv(gym.Env):
 
         reward = self._compute_reward(action)
         terminated = self._is_fallen()
+        if terminated:
+            # A one-time, deliberately large cost for actually falling -- on
+            # top of losing all future alive_bonus/forward reward. Without
+            # this, sprinting recklessly and falling near episode-end can
+            # still out-score walking carefully and surviving, since falling
+            # only forfeits FUTURE reward, never costs anything concrete.
+            reward += REWARD["fall_penalty"]
         truncated = self._step_count >= EPISODE_LENGTH_STEPS
 
         forward_velocity = float(self._mj_data.qvel[FORWARD_AXIS])
