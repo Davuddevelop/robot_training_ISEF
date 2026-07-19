@@ -69,6 +69,12 @@ DOMAIN_RAND = os.environ.get("BITTLE_DOMAIN_RAND", "0") == "1"
 TOTAL_STEPS = int(os.environ.get("BITTLE_TIMESTEPS", PPO_CFG["total_timesteps"]))
 CHECKPOINT_FREQ = int(os.environ.get("BITTLE_CHECKPOINT_FREQ", 100_000))
 
+# Escape hatch: resume training from best_model.zip instead of the latest
+# checkpoint. Use this if "latest" has drifted into a worse policy than the
+# best one ever recorded (e.g. after a long unstable stretch before target_kl
+# was added) -- best_model is the last snapshot that passed the stability gate.
+RESUME_FROM_BEST = os.environ.get("BITTLE_RESUME_FROM_BEST", "0") == "1"
+
 _default_name = "bittle_terrain_dr" if DOMAIN_RAND else "bittle_terrain"
 RUN_NAME = os.environ.get("BITTLE_RUN_NAME", _default_name)
 
@@ -256,21 +262,77 @@ class TerrainCurriculumCallback(BaseCallback):
 # ---------------------------------------------------------------------------
 
 def main():
-    checkpoint = find_latest_checkpoint()
     difficulty, best_dist = load_curriculum_state()
+    vec_env = DummyVecEnv([make_env(i, difficulty) for i in range(PPO_CFG["n_envs"])])
 
     print("=" * 60)
     print(f"  Run: {RUN_NAME}   (UNEVEN TERRAIN)")
     print(f"  Domain randomization: {DOMAIN_RAND}")
-    if checkpoint:
-        done_steps, ckpt_model, ckpt_vecnorm = checkpoint
-        print(f"  RESUMING from checkpoint: {done_steps:,} steps already done "
-              f"({ckpt_model.name})")
-        print(f"  Curriculum resumes at difficulty {difficulty:.2f} "
-              f"(best distance so far: {best_dist:.3f} m)")
+
+    if RESUME_FROM_BEST:
+        # Deliberate escape hatch: the "latest" checkpoint can end up worse
+        # than best_model if training spent a long stretch unstable (this is
+        # why we added target_kl -- but that doesn't undo damage already
+        # done to a policy that kept training through the instability).
+        # best_model.zip is the last snapshot that passed the stability gate,
+        # so we resume training from THERE instead, now protected by target_kl.
+        best_model_path   = SAVE_DIR / "best_model"
+        best_vecnorm_path = SAVE_DIR / "best_vecnormalize.pkl"
+        if not (best_model_path.with_suffix(".zip").exists() and best_vecnorm_path.exists()):
+            print("  ERROR: BITTLE_RESUME_FROM_BEST=1 set but no best_model found "
+                  f"in {SAVE_DIR}.")
+            return
+        env = VecNormalize.load(str(best_vecnorm_path), vec_env)
+        env.training = True
+        env.norm_reward = True
+        model = PPO.load(str(best_model_path), env=env, device="cpu")
+        model.target_kl = PPO_CFG["target_kl"]
+        model.learning_rate = PPO_CFG["learning_rate"]
+        done_steps = model.num_timesteps
+        resumed = True
+        print(f"  RESUMING FROM BEST_MODEL (skipping the 'latest' checkpoint on purpose): "
+              f"{done_steps:,} steps, best distance {best_dist:.3f} m")
     else:
-        done_steps = 0
-        print("  STARTING FRESH — no checkpoint found.")
+        checkpoint = find_latest_checkpoint()
+        if checkpoint:
+            done_steps, ckpt_model, ckpt_vecnorm = checkpoint
+            env = VecNormalize.load(str(ckpt_vecnorm), vec_env)
+            env.training = True
+            env.norm_reward = True
+            model = PPO.load(str(ckpt_model), env=env, device="cpu")
+            # PPO.load() restores hyperparameters AS THEY WERE WHEN SAVED -- config
+            # changes made since then (like adding target_kl) do NOT apply unless
+            # we explicitly override them here.
+            model.target_kl = PPO_CFG["target_kl"]
+            model.learning_rate = PPO_CFG["learning_rate"]
+            resumed = True
+            print(f"  RESUMING from checkpoint: {done_steps:,} steps already done "
+                  f"({ckpt_model.name})")
+        else:
+            done_steps = 0
+            resumed = False
+            print("  STARTING FRESH — no checkpoint found.")
+            env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+            model = PPO(
+                "MlpPolicy", env,
+                learning_rate = PPO_CFG["learning_rate"],
+                n_steps       = PPO_CFG["n_steps"],
+                batch_size    = PPO_CFG["batch_size"],
+                n_epochs      = PPO_CFG["n_epochs"],
+                gamma         = PPO_CFG["gamma"],
+                gae_lambda    = PPO_CFG["gae_lambda"],
+                clip_range    = PPO_CFG["clip_range"],
+                ent_coef      = PPO_CFG["ent_coef"],
+                vf_coef       = PPO_CFG["vf_coef"],
+                max_grad_norm = PPO_CFG["max_grad_norm"],
+                target_kl     = PPO_CFG["target_kl"],
+                policy_kwargs = {"net_arch": PPO_CFG["net_arch"]},
+                device        = "cpu",
+                verbose       = 1,
+            )
+
+    print(f"  Curriculum resumes at difficulty {difficulty:.2f} "
+          f"(best distance so far: {best_dist:.3f} m)")
     print(f"  Curriculum: {CUR['start_difficulty']} → {CUR['max_difficulty']} "
           f"(step {CUR['step']}, promote at {CUR['promote_distance']} m)")
     print(f"  Target total steps: {TOTAL_STEPS:,}   parallel envs: {PPO_CFG['n_envs']}")
@@ -282,38 +344,6 @@ def main():
         print(f"\nAlready at/past target ({done_steps:,} >= {TOTAL_STEPS:,} steps). "
               f"Nothing to do — raise BITTLE_TIMESTEPS to train further.")
         return
-
-    vec_env = DummyVecEnv([make_env(i, difficulty) for i in range(PPO_CFG["n_envs"])])
-
-    if checkpoint:
-        env = VecNormalize.load(str(ckpt_vecnorm), vec_env)
-        env.training = True
-        env.norm_reward = True
-        model = PPO.load(str(ckpt_model), env=env, device="cpu")
-        # PPO.load() restores hyperparameters AS THEY WERE WHEN SAVED -- config
-        # changes made since then (like adding target_kl) do NOT apply unless
-        # we explicitly override them here.
-        model.target_kl = PPO_CFG["target_kl"]
-        model.learning_rate = PPO_CFG["learning_rate"]
-    else:
-        env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
-        model = PPO(
-            "MlpPolicy", env,
-            learning_rate = PPO_CFG["learning_rate"],
-            n_steps       = PPO_CFG["n_steps"],
-            batch_size    = PPO_CFG["batch_size"],
-            n_epochs      = PPO_CFG["n_epochs"],
-            gamma         = PPO_CFG["gamma"],
-            gae_lambda    = PPO_CFG["gae_lambda"],
-            clip_range    = PPO_CFG["clip_range"],
-            ent_coef      = PPO_CFG["ent_coef"],
-            vf_coef       = PPO_CFG["vf_coef"],
-            max_grad_norm = PPO_CFG["max_grad_norm"],
-            target_kl     = PPO_CFG["target_kl"],
-            policy_kwargs = {"net_arch": PPO_CFG["net_arch"]},
-            device        = "cpu",
-            verbose       = 1,
-        )
 
     callbacks = CallbackList([
         CheckpointCallback(
@@ -336,7 +366,7 @@ def main():
     print(f"\nTraining for {remaining_steps:,} more steps "
           f"(target {TOTAL_STEPS:,} total) …\n")
     model.learn(total_timesteps=remaining_steps,
-                reset_num_timesteps=(checkpoint is None),
+                reset_num_timesteps=(not resumed),
                 callback=callbacks)
 
     print("\nSaving final model …")
