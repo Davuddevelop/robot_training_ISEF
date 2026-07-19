@@ -288,6 +288,17 @@ PPO = {
     # This IS PPO's core idea — prevents destructively large updates.
     "clip_range": 0.2,
 
+    # Safety valve on top of clip_range. clip_range limits how far a SINGLE
+    # sample's update can move; it does NOT stop the overall policy from
+    # drifting a huge distance across a whole batch of n_epochs=10 passes.
+    # We measured this happening for real: approx_kl readings of 1.0-2.3 and
+    # clip_fraction pinned at ~0.85 (healthy PPO training looks like
+    # approx_kl ~0.01-0.05, clip_fraction well under 0.4) -- the policy was
+    # thrashing, not converging. target_kl makes SB3 stop taking further
+    # epoch passes on a batch the moment the policy has moved this far,
+    # directly capping the runaway updates we observed.
+    "target_kl": 0.03,
+
     # Total environment steps to train for.
     # 5 million is a starting point for locomotion — may need more.
     "total_timesteps": 5_000_000,

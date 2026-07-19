@@ -290,6 +290,11 @@ def main():
         env.training = True
         env.norm_reward = True
         model = PPO.load(str(ckpt_model), env=env, device="cpu")
+        # PPO.load() restores hyperparameters AS THEY WERE WHEN SAVED -- config
+        # changes made since then (like adding target_kl) do NOT apply unless
+        # we explicitly override them here.
+        model.target_kl = PPO_CFG["target_kl"]
+        model.learning_rate = PPO_CFG["learning_rate"]
     else:
         env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
         model = PPO(
@@ -304,6 +309,7 @@ def main():
             ent_coef      = PPO_CFG["ent_coef"],
             vf_coef       = PPO_CFG["vf_coef"],
             max_grad_norm = PPO_CFG["max_grad_norm"],
+            target_kl     = PPO_CFG["target_kl"],
             policy_kwargs = {"net_arch": PPO_CFG["net_arch"]},
             device        = "cpu",
             verbose       = 1,
