@@ -48,6 +48,7 @@ import re
 import sys
 
 import numpy as np
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import (
     BaseCallback, CallbackList, CheckpointCallback,
@@ -74,6 +75,12 @@ CHECKPOINT_FREQ = int(os.environ.get("BITTLE_CHECKPOINT_FREQ", 100_000))
 # best one ever recorded (e.g. after a long unstable stretch before target_kl
 # was added) -- best_model is the last snapshot that passed the stability gate.
 RESUME_FROM_BEST = os.environ.get("BITTLE_RESUME_FROM_BEST", "0") == "1"
+
+# Recovery knob for an already-collapsed policy: BITTLE_RESET_STD=0.5 resets the
+# resumed policy's action stddev so it can explore again. See config.py's
+# "reset_std_default" comment for the full diagnosis of why this is needed.
+_reset_std_raw = os.environ.get("BITTLE_RESET_STD", "")
+RESET_STD = float(_reset_std_raw) if _reset_std_raw else None
 
 _default_name = "bittle_terrain_dr" if DOMAIN_RAND else "bittle_terrain"
 RUN_NAME = os.environ.get("BITTLE_RUN_NAME", _default_name)
@@ -138,6 +145,39 @@ def load_curriculum_state():
             state = json.load(f)
         return state["difficulty"], state["best_dist"]
     return CUR["start_difficulty"], -np.inf
+
+
+def apply_resume_overrides(model, reset_std=None):
+    """
+    Re-apply current config to a model loaded from a checkpoint, and optionally
+    rescue a collapsed action stddev.
+
+    PPO.load() restores hyperparameters AS THEY WERE WHEN SAVED, so edits made
+    to config.py since that checkpoint do NOT apply unless set here explicitly.
+
+    reset_std: if given, force the policy's action stddev to this value. This is
+    the recovery path for an already-collapsed policy (see config.py). It MUST
+    be an in-place .data edit: replacing the log_std Parameter object leaves
+    SB3's optimizer holding the OLD tensor, so the reset would silently never
+    train. Verified experimentally.
+    """
+    model.target_kl = PPO_CFG["target_kl"]
+    model.learning_rate = PPO_CFG["learning_rate"]
+    model.ent_coef = PPO_CFG["ent_coef"]
+
+    std_before = float(np.exp(model.policy.log_std.detach().cpu().numpy()).mean())
+    if reset_std is not None:
+        with torch.no_grad():
+            model.policy.log_std.data.fill_(float(np.log(reset_std)))
+        std_after = float(np.exp(model.policy.log_std.detach().cpu().numpy()).mean())
+        print(f"  RESET policy action stddev: {std_before:.4f} -> {std_after:.4f} "
+              f"(exploration restored)")
+    else:
+        print(f"  Policy action stddev on resume: {std_before:.4f}"
+              + ("   <-- COLLAPSED; consider BITTLE_RESET_STD=0.5"
+                 if std_before < 0.25 else ""))
+    print(f"  ent_coef={model.ent_coef}  target_kl={model.target_kl}")
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -286,12 +326,11 @@ def main():
         env.training = True
         env.norm_reward = True
         model = PPO.load(str(best_model_path), env=env, device="cpu")
-        model.target_kl = PPO_CFG["target_kl"]
-        model.learning_rate = PPO_CFG["learning_rate"]
         done_steps = model.num_timesteps
         resumed = True
         print(f"  RESUMING FROM BEST_MODEL (skipping the 'latest' checkpoint on purpose): "
               f"{done_steps:,} steps, best distance {best_dist:.3f} m")
+        apply_resume_overrides(model, reset_std=RESET_STD)
     else:
         checkpoint = find_latest_checkpoint()
         if checkpoint:
@@ -300,14 +339,10 @@ def main():
             env.training = True
             env.norm_reward = True
             model = PPO.load(str(ckpt_model), env=env, device="cpu")
-            # PPO.load() restores hyperparameters AS THEY WERE WHEN SAVED -- config
-            # changes made since then (like adding target_kl) do NOT apply unless
-            # we explicitly override them here.
-            model.target_kl = PPO_CFG["target_kl"]
-            model.learning_rate = PPO_CFG["learning_rate"]
             resumed = True
             print(f"  RESUMING from checkpoint: {done_steps:,} steps already done "
                   f"({ckpt_model.name})")
+            apply_resume_overrides(model, reset_std=RESET_STD)
         else:
             done_steps = 0
             resumed = False

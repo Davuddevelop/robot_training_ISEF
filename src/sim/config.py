@@ -258,8 +258,37 @@ PPO = {
     "n_envs": 4,
 
     # Entropy bonus: nudges the policy to keep exploring instead of committing
-    # too early. 0.0 works well for locomotion with normalized observations.
-    "ent_coef": 0.0,
+    # too early.
+    #
+    # RAISED from 0.0 after diagnosing a training plateau. With ent_coef=0.0
+    # nothing resists the policy's action stddev shrinking, and in a 16M-step
+    # run it collapsed to std~0.137 (verified: SB3 reported entropy_loss +4.58,
+    # and an 8-dim Gaussian at std=0.137 has entropy exactly -4.55). That
+    # collapse is self-reinforcing and it traps training:
+    #   - KL divergence scales as (delta/std)^2, so at std=0.137 the policy is
+    #     ~53x more KL-sensitive than at std=1.0. Measured consequence: it takes
+    #     only 0.44 deg of joint-angle change to hit KL=0.05, versus 3.2 deg at
+    #     std=1.0. target_kl then aborted the update after 1 of 10 epochs on
+    #     EVERY iteration, so the policy could barely move at all.
+    #   - A near-deterministic policy cannot explore out of a bad gait. An
+    #     experiment sweeping 80 open-loop gaits found only ~5% are viable at
+    #     terrain difficulty 0.4 -- a narrow basin that needs real exploration.
+    # Measured directly: resuming a collapsed policy with ent_coef=0.0 let std
+    # drift further DOWN (-0.0029 over 8k steps), while ent_coef=0.01 pushed it
+    # back UP (+0.0109). 0.01 is a standard locomotion value.
+    "ent_coef": 0.01,
+
+    # Recovery knob for an ALREADY-collapsed policy. ent_coef stops a healthy
+    # policy from collapsing, but it only nudges a collapsed one back very
+    # slowly. Set BITTLE_RESET_STD=0.5 (or any std) when resuming to reset the
+    # policy's action stddev in place, which frees it to explore again
+    # immediately. Leave at None for normal runs; this is a deliberate
+    # intervention, not something that should happen silently.
+    #
+    # MUST be applied as an in-place .data edit -- verified that REPLACING the
+    # log_std Parameter object leaves SB3's optimizer pointing at the old
+    # tensor, so the reset silently fails to train.
+    "reset_std_default": 0.5,
 
     # Value-function loss weight and gradient clipping — standard PPO defaults.
     "vf_coef": 0.5,
