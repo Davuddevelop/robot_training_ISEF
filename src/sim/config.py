@@ -72,14 +72,23 @@ REWARD = {
     # We learned this the hard way: with coeff=1.0 and alive=0.5, a 60k-step run
     # scored 250 reward but walked 0.03 m — it stood still. Raising this makes
     # walking clearly worth more than standing.
-    "forward_velocity_coeff": 5.0,
+    #
+    # Lowered from 5.0 -> 3.5: at 5.0, a modest 0.1 m/s already scored 0.5 per
+    # step -- as much as the entire alive_bonus -- so gambling on extra speed
+    # cost the policy almost nothing relative to staying upright. A 200k-step
+    # A/B at terrain difficulty 0.4 confirmed it: 5.0/0.5 oscillated up to
+    # fall_rate 1.00; 3.5/1.0 never fell once AND covered more distance.
+    "forward_velocity_coeff": 3.5,
 
     # Positive: bonus for each step it stays upright (does not fall). With
     # forward_velocity_coeff=5.0 a moving robot always out-scores a standing one,
     # so this no longer causes standing-still — instead it makes SURVIVING pay,
     # which stops the "lunge forward then fall over" behaviour (a 300k run moved
     # 0.36 m but fell after 70 of 500 steps when this was only 0.1).
-    "alive_bonus": 0.5,
+    #
+    # Raised from 0.5 -> 1.0 alongside the forward_velocity_coeff drop above,
+    # so staying balanced is clearly worth more than the speed it gives up.
+    "alive_bonus": 1.0,
 
     # Negative: penalty for drifting sideways (lateral = X axis, not forward Y).
     # Without this the policy sometimes crab-walks to one side rather than going
