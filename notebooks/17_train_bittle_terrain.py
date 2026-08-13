@@ -181,6 +181,32 @@ def apply_resume_overrides(model, reset_std=None):
 
 
 # ---------------------------------------------------------------------------
+# STD CLAMP CALLBACK
+# ---------------------------------------------------------------------------
+
+class StdClampCallback(BaseCallback):
+    """
+    Keeps the policy's action stddev inside [std_clamp_min, std_clamp_max].
+
+    PPO's entropy bonus has no ceiling or floor of its own -- over a long
+    enough run std can drift to either extreme (collapse: too rigid to
+    explore; explosion: actions close to random). Checked every rollout
+    (each call to _on_step is one env step across all parallel envs, so this
+    runs far more often than eval -- cheap, and catches drift early).
+    """
+
+    def __init__(self, std_min, std_max, verbose=0):
+        super().__init__(verbose)
+        self._log_min = float(np.log(std_min))
+        self._log_max = float(np.log(std_max))
+
+    def _on_step(self):
+        with torch.no_grad():
+            self.model.policy.log_std.data.clamp_(self._log_min, self._log_max)
+        return True
+
+
+# ---------------------------------------------------------------------------
 # CURRICULUM CALLBACK
 # ---------------------------------------------------------------------------
 
@@ -386,6 +412,10 @@ def main():
             save_path         = str(CHECKPT_DIR),
             name_prefix       = f"{RUN_NAME}_ckpt",
             save_vecnormalize = True,
+        ),
+        StdClampCallback(
+            std_min = PPO_CFG["std_clamp_min"],
+            std_max = PPO_CFG["std_clamp_max"],
         ),
         TerrainCurriculumCallback(
             save_dir            = SAVE_DIR,

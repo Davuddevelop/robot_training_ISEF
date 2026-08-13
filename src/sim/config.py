@@ -299,6 +299,18 @@ PPO = {
     # tensor, so the reset silently fails to train.
     "reset_std_default": 0.5,
 
+    # Hard floor and ceiling on the policy's action stddev, enforced every
+    # eval cycle during training. Nothing in ordinary PPO stops std from
+    # drifting to an unhealthy extreme in EITHER direction over a long run:
+    # we measured it collapse to ~0.137 in one run (too rigid to explore) and
+    # explode to 4.57 in another (loss dominated by the entropy bonus, action
+    # noise close to random) -- see EXPERIMENT_LOG.md, 2026-08-13. This clamp
+    # cannot fix WHY std drifts, but it guarantees it can never leave a sane
+    # operating range regardless of how the entropy math behaves at any given
+    # reward scale.
+    "std_clamp_min": 0.1,
+    "std_clamp_max": 1.5,
+
     # Value-function loss weight and gradient clipping — standard PPO defaults.
     "vf_coef": 0.5,
     "max_grad_norm": 0.5,
