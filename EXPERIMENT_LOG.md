@@ -68,6 +68,42 @@ steps.
 callback, checked periodically during training, so it can neither collapse nor explode regardless of
 how the entropy-bonus math behaves at any given reward scale.
 
+## 2026-08-13 — Competition-strategy research: commercial hardware is not a disqualification risk
+
+**Worry:** using a purchased Petoi Bittle X (not self-built hardware) might read as "not our own work" to
+judges, prompting a push toward adding rescue/human-detection framing to compensate.
+
+**Researched (5-agent pass, sourced via WebSearch — WebFetch was blocked for every domain in this
+sandbox, so treat as high-confidence secondary sourcing, not primary-source-verified; verify directly
+before quoting in competition paperwork):**
+
+- **ISEF's own rules** ban "kit building" (doing nothing but assembling a purchased kit), not the use of
+  commercial hardware as a base for real research. No rule anywhere prohibits purchased platforms.
+- **Sabahın Alimləri directly mirrors ISEF's rules** (matching form numbers 1/1A/1B/7, near-identical
+  "kit building" prohibition wording) — it is a genuine ISEF-affiliated national fair, not independently
+  written rules.
+- **Real precedent:** Michelle Wang's ISEF 2023 project (ROBO047) used unmodified commercial DJI Tello
+  drones with custom control/coordination software as the novel contribution — won 4th place Grand Award
+  in Robotics AND an Air Force Research Labs special award simultaneously.
+- **The judging rubric (100 pts, Engineering track, governs ROBO category):** Research Problem 10, Design/
+  Methodology 15, Execution 20, Creativity 20, Presentation 35 (poster 10 + interview 25). Only **4 of 100
+  points** are tied to "real-world impact" (one interview sub-item). The other 96 are rigor, methodology,
+  execution, originality, and whether the student can defend the work independently.
+- **Found the actual citation for our "not first to do sim-to-real on Bittle" novelty claim:** Neuman et
+  al., RSS 2022 Sim2Real Workshop, did sim-to-real specifically on this robot — added to BIBLIOGRAPHY.md
+  as high-priority reading, since the novelty framing in CLAUDE.md §3 needs to point at this, not just
+  assert it.
+
+**Decision:** do not add "helping humanity" / rescue / human-detection framing — it's explicitly excluded
+in CLAUDE.md §3 and §10 already, and the rubric confirms it isn't what's actually being scored. The
+existing CV plan (pretrained person-detector as an honestly-labeled demo on the rubble terrain, not a
+rescue claim) remains available as a visual demo element, but the project's strength is the ablation
+study's rigor, not a product pitch.
+
+**Open item:** have mentor verify the Sabahın Alimləri rules page directly and/or contact the fair's
+review committee about the hardware setup before formal experiments — the specific "Robotics & AI
+category hardware disclosure clause" sub-question could not be confirmed either way from this sandbox.
+
 -----
 
 *Format for new entries: date — one-line headline, then Problem/Fix/Evidence/Caveat as needed.
