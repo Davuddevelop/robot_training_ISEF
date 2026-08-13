@@ -53,11 +53,11 @@ If I ever ask you to "just write it" in a way that skips my understanding, gentl
 
 ## 4. HARDWARE (exact)
 
-- **Robot:** Petoi **Bittle** (base model, *Construction* kit, **alloy/metal servos** — not lite). 9 servos total: 8 leg joints (the action space) + 1 neck joint (kept fixed during walking).
-- **Control board:** Petoi NyBoard (Arduino-based), running **OpenCat** firmware, with a **built-in IMU** (orientation sensor) — this is my only sensor; no extra sensors added.
+- **Robot:** Petoi **Bittle X** — likely **V2** based on board pairing below (needs visual confirmation against Petoi's product photos), **alloy/metal servos**. 9 servos total: 8 leg joints (the action space) + 1 neck joint (kept fixed during walking). CORRECTED 2026-08-13 from physical hardware photos — earlier text said "Bittle base Construction kit," which was the assumption before the robot was assembled.
+- **Control board:** Petoi **BiBoard V1.0** (confirmed from PCB silkscreen), NOT the NyBoard originally assumed. ESP32-MINI-1 module (dual-core Xtensa LX6, 4MB flash), built-in **2.4GHz WiFi + Bluetooth LE**, supports up to 12 PWM servos, runs **OpenCat** firmware (same command protocol family: `i`/`m` set joint angles, `j` queries them, `v`/`V` read IMU/gyro). Built-in IMU retained — still my only sensor; no extra sensors added.
 - **Training computer:** ASUS gaming laptop, **NVIDIA RTX 30-series GPU** (CUDA available). All simulation/training runs here.
-- **Onboard compute (OPTIONAL, gated — see Rule in §9):** Raspberry Pi Zero 2 W, only added late, only if tethered control is already rock-solid.
-- **Comms:** laptop/Pi ↔ NyBoard over serial (UART), OpenCat protocol. Target control loop 30–50 Hz (must be verified, not assumed).
+- **Onboard compute (OPTIONAL, gated — see Rule in §9):** Raspberry Pi Zero 2 W, only added late, only if tethered control is already rock-solid. NOTE: BiBoard's ESP32 cannot run the trained PyTorch/ONNX policy itself (too little RAM/compute for a neural-net forward pass at control-loop rate) — it only drives servos and reads the IMU, same role as the old NyBoard would have had. The Pi (or laptop) is still what runs the policy.
+- **Comms:** BiBoard supports wired serial (USB-C), WiFi, AND Bluetooth — more options than the NyBoard had (which was serial-only, BLE only via a separate dongle). Recommend starting Phase 3 on **wired serial**, since a stable wired link makes control-latency measurement (needed for system ID, §7) cleaner than WiFi's more variable latency — but this is a recommendation to confirm with your mentor, not a settled decision. Target control loop 30–50 Hz (must be verified on the real board, not assumed).
 
 -----
 
@@ -77,11 +77,11 @@ If I ever ask you to "just write it" in a way that skips my understanding, gentl
 
 ```
 LAPTOP (RTX 30-series): trains policy in MuJoCo; in early phases also runs control via tether
-   │  serial (UART), 30–50 Hz
+   │  serial (UART, recommended) or WiFi/BLE, 30–50 Hz
    ▼
-NyBoard (built-in IMU, drives servos, OpenCat firmware)
+BiBoard V1.0 — ESP32 (built-in IMU, drives servos, OpenCat firmware)
    ▼
-BITTLE: 8 leg servos (action) + 1 fixed neck servo
+BITTLE X: 8 leg servos (action) + 1 fixed neck servo
 
 [OPTIONAL/LATE] Raspberry Pi Zero 2 W on the robot runs the exported policy autonomously.
 ```
