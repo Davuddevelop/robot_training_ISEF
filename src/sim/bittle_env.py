@@ -182,23 +182,33 @@ class BittleEnv(gym.Env):
         nrow, ncol = self._hfield_nrow, self._hfield_ncol
 
         # 1. Random noise.
-        field = self.np_random.uniform(0.0, 1.0, size=(nrow, ncol))
+        raw = self.np_random.uniform(0.0, 1.0, size=(nrow, ncol))
 
-        # 2. Smooth with a simple neighbour-average blur. Passes shrink as
-        # difficulty climbs: max difficulty gets ZERO smoothing (raw noise —
-        # a genuinely jagged, rocky texture), difficulty 0 gets full smoothing
-        # (doesn't matter, step 3 zeroes it anyway).
-        passes = round(TERRAIN["smoothing_passes"] * (1.0 - self._terrain_difficulty))
-        for _ in range(passes):
-            field = self._smooth(field)
+        # 2. Build the fully-smoothed version ONCE, then blend towards the raw
+        # noise as difficulty climbs. Texture goes from gentle rolling ground at
+        # difficulty 0 to jagged rock at difficulty 1.
+        #
+        # This replaces `passes = round(smoothing_passes * (1 - difficulty))`,
+        # which was a STEP function: round() gave 3 passes below d≈0.17, 2 up to
+        # 0.5, 1 up to 0.84, and 0 above 0.84. So the ground barely changed for
+        # most of the curriculum and then jumped brutally at one specific rung --
+        # measured mean ground slope went 5.4° at d=0.8 to 15.1° at d=0.9, nearly
+        # TRIPLING in a single 0.1 curriculum step. Training runs stalled at
+        # exactly d=0.90, which was not a coincidence.
+        #
+        # Blending makes difficulty a smooth, monotone axis while leaving both
+        # endpoints untouched: d=0 is still flat, d=1 is still raw noise. The
+        # terrain is not made easier -- the SCALE is made linear, so "difficulty
+        # 0.5" now means something halfway between the extremes.
+        smooth = raw.copy()
+        for _ in range(TERRAIN["smoothing_passes"]):
+            smooth = self._smooth(smooth)
 
-        # Re-normalise to [0, 1] after smoothing (blur shrinks the range).
-        field -= field.min()
-        if field.max() > 1e-8:
-            field /= field.max()
+        d = self._terrain_difficulty
+        field = (1.0 - d) * self._normalise01(smooth) + d * self._normalise01(raw)
 
-        # 3. Scale by difficulty.
-        field *= self._terrain_difficulty
+        # 3. Scale amplitude by difficulty (this is what makes d=0 perfectly flat).
+        field *= d
 
         # 4. Flatten a spawn patch at the grid centre (robot starts here).
         cr, cc = nrow // 2, ncol // 2
@@ -281,6 +291,13 @@ class BittleEnv(gym.Env):
             # the robot clips through the very obstacles that make the terrain hard.
             # Recomputing it here keeps collisions honest.
             self._mj_model.geom_rbound[gid] = float(np.linalg.norm(half_extents))
+
+    @staticmethod
+    def _normalise01(field):
+        """Rescale a field to span exactly [0, 1] (blurring shrinks its range)."""
+        out = field - field.min()
+        peak = out.max()
+        return out / peak if peak > 1e-8 else out
 
     @staticmethod
     def _smooth(field):
