@@ -232,6 +232,15 @@ def _plot(rows):
     out = ROOT / "data" / "terrain_benchmark.png"
     plt.savefig(out, dpi=150)
     print(f"Saved graph → {out}")
+
+    # plt.show() BLOCKS until the figure window is closed, which makes the
+    # terminal look hung even though the benchmark has completely finished --
+    # every number is already printed and the .png is already saved by this
+    # point. Set BITTLE_NO_SHOW=1 to skip the popup and get the prompt straight
+    # back (useful when running several benchmarks in a row).
+    if os.environ.get("BITTLE_NO_SHOW", "0") == "1":
+        print("      (BITTLE_NO_SHOW=1 — skipping the popup; open the .png above)")
+        return
     try:
         plt.show()
     except Exception:
