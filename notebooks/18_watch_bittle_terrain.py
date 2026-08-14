@@ -45,6 +45,21 @@ def main():
         model_path, vecnorm_path = BEST_MODEL_PATH, BEST_VECNORM_PATH
         print("Using best_model (highest distance seen during training).")
 
+    # Explicit override, matching 16_terrain_benchmark.py. "best" and "final" can
+    # be completely different policies -- in the 2026-08-14 run the final model
+    # never fell at difficulty 1.0 while best_model fell 80% of the time, and
+    # best_model walked flat ground while final fell on it every episode. Being
+    # able to watch a SPECIFIC snapshot matters:
+    #   $env:BITTLE_MODEL_PATH="models\bittle_terrain\bittle_terrain_model"
+    if os.environ.get("BITTLE_MODEL_PATH"):
+        model_path = pathlib.Path(os.environ["BITTLE_MODEL_PATH"])
+        print(f"Using explicit BITTLE_MODEL_PATH override.")
+    if os.environ.get("BITTLE_VECNORM_PATH"):
+        vecnorm_path = pathlib.Path(os.environ["BITTLE_VECNORM_PATH"])
+
+    print(f"  model:   {model_path}.zip")
+    print(f"  vecnorm: {vecnorm_path}")
+
     if not model_path.with_suffix(".zip").exists():
         print(f"No model at {model_path}.zip — run 17_train_bittle_terrain.py first.")
         return

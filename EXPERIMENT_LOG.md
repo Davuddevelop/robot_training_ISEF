@@ -158,6 +158,56 @@ is to re-run `16_terrain_benchmark.py` against the *final* model of the last run
 never actually been measured — before drawing any conclusion about how good the current
 policy really is.
 
+## 2026-08-14 — The final model never falls at max difficulty — but may be surviving by barely moving
+
+With the best-model bug fixed, the final model of the 5M-step run was benchmarked for the
+first time (10 episodes/point, laptop, MuJoCo 3.9.0/Windows). It behaves nothing like the
+`best_model` snapshot we had been measuring for three runs.
+
+| difficulty | fixed dist / fall | **final** dist / fall / survival | best_model dist / fall |
+|---|---|---|---|
+| 0.00 | 1.284 / 0.00 | 0.335 / **1.00** / 314 | 0.790 / 0.00 |
+| 0.25 | 0.814 / 0.30 | 0.451 / 0.20 / 487 | 0.773 / 0.10 |
+| 0.50 | 0.684 / 0.30 | 0.361 / 0.20 / 499 | 0.682 / 0.30 |
+| 0.75 | 0.383 / 0.70 | 0.331 / **0.10** / 484 | 0.447 / 0.70 |
+| 1.00 | 0.258 / 1.00 | 0.303 / **0.00** / **500** | 0.265 / 0.80 |
+
+**1. Maximum difficulty is survivable, and only the learned policy manages it.** At d=1.0 the
+final model completed all 10 episodes without falling (survival 500/500). Both hand-tuned
+gaits fell in **100%** of episodes there (`21_terrain_achievability.py`: default 0.258 m,
+swept-parameter 0.306 m, both fall_rate 1.00, clearing the flat patch in only 2/10 and 4/10
+episodes). This is the strongest evidence the project has produced for "why RL is needed".
+
+**2. But the distance numbers undercut the headline.** The final model travels ~0.30–0.36 m at
+*every* difficulty from 0.5 up — nearly flat across conditions — and its 0.303 m at d=1.0 sits
+just **below the ~0.31 m flat-spawn-patch boundary**, meaning on average it does not clear the
+flattened start area at all. A policy that never falls because it never really leaves the
+start is not a walking policy. **Not yet resolved: this requires video inspection, which the
+project's own process rule already demands after any reward change.**
+
+**3. The "turtle robot" concern was correct.** When `forward_velocity_coeff` was lowered
+5.0→3.5 and `alive_bonus` raised 0.5→1.0, the objection was raised that the robot must not
+become slow and timid. The 200k-step A/B showed no such effect, so the change was adopted. At
+full scale with the curriculum, the predicted failure is exactly what appeared: near-zero
+falls with minimal forward progress. **A second instance of this log's own lesson — short
+screens can reject bad changes but cannot confirm good ones.** The reward balance needs
+revisiting, and the next test must run at full scale.
+
+**4. Catastrophic forgetting, cleanly demonstrated.** The final model falls in **100%** of
+flat-ground (d=0.00) episodes — terrain the same run's early snapshot still walks at 0.790 m
+with zero falls. Training at a single difficulty at a time produced a d=1.0 specialist that
+lost flat ground entirely. This is direct evidence for the planned fix: sample each episode's
+difficulty from a *band* below the current maximum instead of one global value.
+
+**5. "Best" and "final" are different specialists, not better and worse.** best_model handles
+easy ground (0.790 m, no falls at d=0.0) and fails hard ground (0.80 fall rate at d=1.0);
+final is the reverse. The goal of band sampling is a single policy that does both.
+
+**Caveat on cross-machine numbers:** the sandbox used for analysis runs MuJoCo 3.10.0/Linux
+versus the laptop's 3.9.0/Windows. Contact-rich locomotion is chaotic, so identical seeds
+diverge across platforms — sandbox and laptop gait numbers differ materially. Only compare
+numbers produced on the same machine. All figures in this entry are from the laptop.
+
 -----
 
 *Format for new entries: date — one-line headline, then Problem/Fix/Evidence/Caveat as needed.
