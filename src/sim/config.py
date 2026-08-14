@@ -235,6 +235,27 @@ TERRAIN = {
         # progresses through difficulty levels, since exposure to a RANGE of
         # terrain is the point, not maximizing performance at each rung.
         "promote_distance": 0.4,
+
+        # Fall-rate ceiling for an evaluation to count as "stable" at all.
+        # This only became a real measurement when n_eval rose from 3 to 10:
+        # with 3 episodes, fall_rate could only be 0, 0.33, 0.67 or 1.0, so a
+        # 0.5 threshold was closer to a coin flip than a criterion.
+        "promote_max_fall_rate": 0.3,
+
+        # --- Demotion. Promotion used to be one-way, so a single lucky
+        # evaluation could push the robot onto ground it could not actually
+        # hold, with no way back -- runs then burned millions of steps
+        # thrashing there. Dropping a rung lets the policy consolidate and
+        # re-climb. Requires TWO consecutive bad evaluations so ordinary
+        # evaluation noise cannot trigger it.
+        "demote_distance": 0.2,
+        "demote_fall_rate": 0.6,
+        "demote_after_bad_evals": 2,
+
+        # Minimum steps to spend at a difficulty before promotion is allowed.
+        # Anti-thrash guard: without it, promote/demote can oscillate every
+        # evaluation and the policy never settles anywhere long enough to learn.
+        "min_steps_at_difficulty": 200_000,
     },
 }
 
@@ -298,6 +319,16 @@ PPO = {
     # log_std Parameter object leaves SB3's optimizer pointing at the old
     # tensor, so the reset silently fails to train.
     "reset_std_default": 0.5,
+
+    # How the learning rate behaves over a run.
+    #   "constant" -- the same rate from start to finish (what we have always used)
+    #   "linear"   -- decays smoothly from `learning_rate` down to 0 at the end
+    # Linear decay is standard for PPO locomotion: big steps early while the policy
+    # is bad, small careful steps late while it is fine-tuning. Kept as a switch so
+    # its effect can be A/B measured on its own rather than bundled with other edits.
+    # NOTE: the schedule is driven by progress through `total_timesteps`, so changing
+    # the step budget mid-run makes the rate jump.
+    "lr_schedule": "constant",
 
     # Hard floor and ceiling on the policy's action stddev, enforced every
     # eval cycle during training. Nothing in ordinary PPO stops std from

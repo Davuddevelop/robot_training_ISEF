@@ -24,6 +24,8 @@ see the baseline; the RL columns will say "no model".
 """
 
 import csv
+import json
+import os
 import pathlib
 import sys
 
@@ -37,9 +39,13 @@ from src.sim.config import NEUTRAL_POSE, ACTION_LIMIT, CONTROL_TIMESTEP
 
 # Difficulty levels to test (flat → rough).
 DIFFICULTIES = [0.0, 0.25, 0.5, 0.75, 1.0]
-N_EPISODES   = 10          # episodes per controller per difficulty (rule: >=10 trials)
+# Episodes per controller per difficulty. 10 satisfies the project's ">=10 trials"
+# rule but is still noisy: at 10 episodes, "fall_rate 0.10 vs 0.30" is literally
+# 1 fall vs 3. Raise to 30-50 (BITTLE_BENCH_EPISODES=30) for any number that goes
+# into the final write-up.
+N_EPISODES   = int(os.environ.get("BITTLE_BENCH_EPISODES", "10"))
 
-RUN_NAME     = "bittle_terrain"
+RUN_NAME     = os.environ.get("BITTLE_RUN_NAME", "bittle_terrain")
 ROOT         = pathlib.Path(__file__).parent.parent
 SAVE_DIR     = ROOT / "models" / RUN_NAME
 # Prefer best_model (highest distance seen during training) over the final
@@ -51,8 +57,23 @@ _FINAL_MODEL_PATH   = SAVE_DIR / f"{RUN_NAME}_model"
 _FINAL_VECNORM_PATH = SAVE_DIR / "vecnormalize.pkl"
 if not (MODEL_PATH.with_suffix(".zip").exists() and VECNORM_PATH.exists()):
     MODEL_PATH, VECNORM_PATH = _FINAL_MODEL_PATH, _FINAL_VECNORM_PATH
+
+# Explicit overrides, so ANY snapshot can be benchmarked without editing code:
+#   $env:BITTLE_MODEL_PATH="models\bittle_terrain\bittle_terrain_model"
+# (omit the .zip). Needed because "best" and "final" are different policies and
+# we spent three runs benchmarking one while believing we were measuring the other.
+if os.environ.get("BITTLE_MODEL_PATH"):
+    MODEL_PATH = pathlib.Path(os.environ["BITTLE_MODEL_PATH"])
+if os.environ.get("BITTLE_VECNORM_PATH"):
+    VECNORM_PATH = pathlib.Path(os.environ["BITTLE_VECNORM_PATH"])
+
 DATA_DIR     = ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# The spawn area is flattened so the robot doesn't topple before it can step.
+# Anything at or below this distance means it never actually reached the rough
+# ground -- an important "did it even face the terrain?" line on the results.
+FLAT_PATCH_M = 0.31
 
 NEUTRAL = np.array(NEUTRAL_POSE, dtype=np.float64)
 
@@ -129,6 +150,28 @@ def main():
         from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
         which = "best_model" if MODEL_PATH.name == "best_model" else "final model"
         print(f"Loading RL policy: {RUN_NAME} ({which})")
+        print(f"  model:   {MODEL_PATH}.zip")
+        print(f"  vecnorm: {VECNORM_PATH}")
+
+        # Announce WHAT this snapshot actually is. Without this, a benchmark can
+        # silently measure an early-curriculum snapshot while you believe you are
+        # measuring the finished policy -- which is exactly what happened for three
+        # consecutive runs before the best-model selection bug was found.
+        meta_path = MODEL_PATH.parent / "best_model_meta.json"
+        if MODEL_PATH.name == "best_model" and meta_path.exists():
+            with open(meta_path) as f:
+                meta = json.load(f)
+            print(f"  ├─ snapshot taken at terrain difficulty {meta['difficulty']:.2f}"
+                  f", step {meta['timesteps']:,}")
+            print(f"  └─ scored {meta['score_distance_m']:.3f} m, "
+                  f"fall_rate {meta['fall_rate']:.2f} "
+                  f"over {meta['n_eval_episodes']} eval episodes")
+        elif MODEL_PATH.name == "best_model":
+            print("  └─ NOTE: no best_model_meta.json — this snapshot predates "
+                  "metadata tracking, so which difficulty it came from is unknown.")
+        print(f"  Episodes per point: {N_EPISODES}"
+              + ("   (low — use BITTLE_BENCH_EPISODES=30 for reportable numbers)"
+                 if N_EPISODES < 30 else ""))
         model = PPO.load(str(MODEL_PATH))
         norm  = VecNormalize.load(str(VECNORM_PATH),
                                   DummyVecEnv([lambda: BittleEnv(terrain=True)]))

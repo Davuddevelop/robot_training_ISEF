@@ -272,6 +272,16 @@ class BittleEnv(gym.Env):
             self._mj_model.geom_size[gid] = half_extents
             self._mj_model.geom_pos[gid] = [x, y, ground_z + half_extents[2]]
 
+            # geom_rbound is the radius of the bounding sphere MuJoCo's broadphase
+            # uses to decide which pairs are even WORTH checking for contact. It is
+            # computed once at model-compile time from the size in the XML, and is
+            # NOT recalculated when we resize a geom at runtime like we just did.
+            # Leaving it stale means a chunk we grew is still tested against its old,
+            # smaller sphere, so contacts near its corners can be silently skipped --
+            # the robot clips through the very obstacles that make the terrain hard.
+            # Recomputing it here keeps collisions honest.
+            self._mj_model.geom_rbound[gid] = float(np.linalg.norm(half_extents))
+
     @staticmethod
     def _smooth(field):
         """Average each cell with its 4 neighbours (a cheap blur, edges clamped)."""

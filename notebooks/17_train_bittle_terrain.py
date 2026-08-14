@@ -85,6 +85,19 @@ RESET_STD = float(_reset_std_raw) if _reset_std_raw else None
 _default_name = "bittle_terrain_dr" if DOMAIN_RAND else "bittle_terrain"
 RUN_NAME = os.environ.get("BITTLE_RUN_NAME", _default_name)
 
+# Random seed. Until this existed, NOTHING in this script was seeded -- not PPO's
+# weight init, not the terrain generator -- so re-running the same config gave a
+# different answer every time. That makes any A/B comparison ("did change X help?")
+# uninterpretable, because you cannot tell a real effect from run-to-run luck.
+# Set BITTLE_SEED to a different integer per arm to measure seed variance.
+SEED = int(os.environ.get("BITTLE_SEED", "0"))
+
+# Pin the terrain difficulty and disable curriculum promotion. Used for controlled
+# A/B experiments: it holds the operating point fixed so a measured difference comes
+# from the change under test, not from one arm happening to promote earlier.
+_fixed_diff_raw = os.environ.get("BITTLE_FIXED_DIFFICULTY", "")
+FIXED_DIFFICULTY = float(_fixed_diff_raw) if _fixed_diff_raw else None
+
 ROOT         = pathlib.Path(__file__).parent.parent
 SAVE_DIR     = ROOT / "models" / RUN_NAME
 MONITOR_DIR  = SAVE_DIR / "monitor_logs"
@@ -138,13 +151,67 @@ def find_latest_checkpoint():
     return best_steps, best_model, vecnorm
 
 
+def _fresh_curriculum_state():
+    return {
+        "version": 2,
+        "difficulty": CUR["start_difficulty"],
+        # Best is ranked LEXICOGRAPHICALLY on (difficulty, score) -- see
+        # TerrainCurriculumCallback._is_better for why a single scalar was wrong.
+        "best_difficulty": -1.0,
+        "best_score": -np.inf,
+        "best_by_difficulty": {},   # "0.90" -> best score seen at that rung
+        "bad_evals": 0,
+        "steps_at_difficulty": 0,
+    }
+
+
 def load_curriculum_state():
-    """Read back the curriculum's difficulty/best-distance from the last run."""
-    if CURRICULUM_STATE_PATH.exists():
-        with open(CURRICULUM_STATE_PATH) as f:
-            state = json.load(f)
-        return state["difficulty"], state["best_dist"]
-    return CUR["start_difficulty"], -np.inf
+    """
+    Read back the curriculum state from the last run.
+
+    v1 files stored a single global `best_dist` compared across ALL difficulties.
+    That was a bug: distance naturally FALLS as terrain gets harder, so a best set
+    on easy ground could never be beaten on hard ground, which froze best_model.zip
+    at an early, undertrained snapshot for entire 5M-step runs. We deliberately
+    DISCARD that number on upgrade rather than migrating it -- it is precisely the
+    corrupted quantity -- and keep only the difficulty we had reached.
+    """
+    if not CURRICULUM_STATE_PATH.exists():
+        return _fresh_curriculum_state()
+
+    with open(CURRICULUM_STATE_PATH) as f:
+        state = json.load(f)
+
+    if state.get("version", 1) < 2:
+        print("  NOTE: found a v1 curriculum_state.json. Its 'best_dist' was a "
+              "cross-difficulty global scalar (known bug) -- DISCARDING it and "
+              "keeping the difficulty only. best_model will be re-established.")
+        fresh = _fresh_curriculum_state()
+        fresh["difficulty"] = state.get("difficulty", CUR["start_difficulty"])
+        return fresh
+
+    return state
+
+
+def make_learning_rate():
+    """
+    Build the learning rate PPO should use -- either a constant, or a schedule.
+
+    SB3 accepts either a float OR a callable taking `progress_remaining`, which
+    runs from 1.0 at the start of training down to 0.0 at the end. A linearly
+    decaying rate takes big steps early (when the policy is bad and moving fast
+    is cheap) and small steps late (when it is fine-tuning and a big step would
+    wreck what it has). Controlled by PPO["lr_schedule"] in config.py so the
+    change can be measured on its own instead of being tangled with other edits.
+    """
+    base = PPO_CFG["learning_rate"]
+    if PPO_CFG.get("lr_schedule", "constant") != "linear":
+        return base
+
+    def linear(progress_remaining):
+        return progress_remaining * base
+
+    return linear
 
 
 def apply_resume_overrides(model, reset_std=None):
@@ -162,8 +229,16 @@ def apply_resume_overrides(model, reset_std=None):
     train. Verified experimentally.
     """
     model.target_kl = PPO_CFG["target_kl"]
-    model.learning_rate = PPO_CFG["learning_rate"]
     model.ent_coef = PPO_CFG["ent_coef"]
+
+    # Learning rate needs BOTH lines. SB3 does not read `model.learning_rate`
+    # during training -- it reads `model.lr_schedule`, which PPO.load() already
+    # built from the value baked into the checkpoint. So assigning the attribute
+    # alone silently does nothing, and every resumed run kept training at the OLD
+    # learning rate. _setup_lr_schedule() rebuilds the schedule from the new value.
+    # (ent_coef and target_kl above ARE read directly each update, so they work.)
+    model.learning_rate = make_learning_rate()
+    model._setup_lr_schedule()
 
     std_before = float(np.exp(model.policy.log_std.detach().cpu().numpy()).mean())
     if reset_std is not None:
@@ -220,22 +295,54 @@ class TerrainCurriculumCallback(BaseCallback):
     robot can handle the terrain it is actually training on before making it
     harder — otherwise we would promote it into terrain it cannot walk on yet.
 
-    Persists (difficulty, best_dist) to disk every eval so a resumed run picks
-    up the curriculum where it left off, instead of restarting on flat ground.
+    Persists its state to disk every eval so a resumed run picks up the
+    curriculum where it left off, instead of restarting on flat ground.
+
+    Evaluation always runs on FIXED seeds (EVAL_SEEDS) so every evaluation faces
+    the SAME set of terrains. Without that, consecutive evaluations differ because
+    the map changed, not because the policy did -- you would be measuring the dice.
+    The eval env also keeps domain_rand=False even in DR runs: it is the measuring
+    instrument, so it stays fixed even when training conditions vary.
     """
 
-    def __init__(self, save_dir, state_path, initial_difficulty, initial_best_dist,
-                 eval_freq=100_000, n_eval=3, verbose=1):
+    def __init__(self, save_dir, state_path, state, allow_promotion=True,
+                 eval_freq=100_000, n_eval=10, verbose=1):
         super().__init__(verbose)
         self._save_dir   = pathlib.Path(save_dir)
         self._state_path = pathlib.Path(state_path)
         self._eval_freq  = eval_freq
         self._n_eval     = n_eval
-        self._difficulty = initial_difficulty
-        self._best_dist  = initial_best_dist
+        self._allow_promotion = allow_promotion
+
+        self._difficulty      = state["difficulty"]
+        self._best_difficulty = state["best_difficulty"]
+        self._best_score      = state["best_score"]
+        self._best_by_diff    = dict(state["best_by_difficulty"])
+        self._bad_evals       = state["bad_evals"]
+        self._steps_at_diff   = state["steps_at_difficulty"]
+
         self._last_eval  = 0
+        self._last_eval_steps = 0
+        self._eval_seeds = [9000 + i for i in range(n_eval)]
         self._eval_env = DummyVecEnv([lambda: BittleEnv(
-            domain_rand=False, terrain=True, terrain_difficulty=initial_difficulty)])
+            domain_rand=False, terrain=True, terrain_difficulty=state["difficulty"])])
+
+    def _is_better(self, difficulty, score):
+        """
+        Rank checkpoints lexicographically: harder terrain wins outright, and
+        only ties on difficulty are broken by distance.
+
+        The old code compared one global distance across ALL difficulties, which
+        is comparing apples to oranges -- distance naturally drops as the ground
+        gets harder, so an easy-terrain best could never be beaten and best_model
+        stayed frozen on a barely-trained snapshot for an entire run. Walking
+        0.4 m over rock genuinely beats walking 0.9 m over flat ground.
+        """
+        if difficulty > self._best_difficulty + 1e-9:
+            return True
+        if abs(difficulty - self._best_difficulty) < 1e-9:
+            return score > self._best_score
+        return False
 
     def _on_training_start(self):
         # Apply the (possibly resumed) difficulty to every training env and
@@ -251,7 +358,15 @@ class TerrainCurriculumCallback(BaseCallback):
 
     def _save_state(self):
         with open(self._state_path, "w") as f:
-            json.dump({"difficulty": self._difficulty, "best_dist": self._best_dist}, f)
+            json.dump({
+                "version": 2,
+                "difficulty": self._difficulty,
+                "best_difficulty": self._best_difficulty,
+                "best_score": self._best_score,
+                "best_by_difficulty": self._best_by_diff,
+                "bad_evals": self._bad_evals,
+                "steps_at_difficulty": self._steps_at_diff,
+            }, f, indent=2)
 
     def _evaluate_distance(self):
         """
@@ -267,7 +382,10 @@ class TerrainCurriculumCallback(BaseCallback):
         a fall).
         """
         distances, falls = [], 0
-        for _ in range(self._n_eval):
+        for seed in self._eval_seeds:
+            # Same terrains every evaluation, so a change in the number means the
+            # POLICY changed, not the map. VecEnv.seed() applies at the next reset.
+            self._eval_env.seed(seed)
             raw_obs = self._eval_env.reset()
             start_y, last_y, done, steps = None, 0.0, [False], 0
             while not done[0]:
@@ -288,35 +406,72 @@ class TerrainCurriculumCallback(BaseCallback):
             return True
         self._last_eval = self.num_timesteps
 
-        mean_dist, fall_rate = self._evaluate_distance()
-        # Require the MAJORITY of eval episodes to survive the full episode
-        # before we trust this distance number at all. Otherwise a policy
-        # that lunges forward and falls near the end can look like "best" by
-        # distance alone, even though it never walks stably.
-        stable = fall_rate <= 0.5
+        self._steps_at_diff += self.num_timesteps - self._last_eval_steps
+        self._last_eval_steps = self.num_timesteps
 
+        mean_dist, fall_rate = self._evaluate_distance()
+        stable = fall_rate <= CUR["promote_max_fall_rate"]
+
+        # --- Best model: lexicographic on (difficulty, distance). See _is_better.
         best_marker = ""
-        if stable and mean_dist > self._best_dist:
-            self._best_dist = mean_dist
+        if stable and self._is_better(self._difficulty, mean_dist):
+            self._best_difficulty = self._difficulty
+            self._best_score = mean_dist
             self.model.save(str(self._save_dir / "best_model"))
             self.training_env.save(str(self._save_dir / "best_vecnormalize.pkl"))
+            # Metadata so a benchmark can NEVER again silently measure an early
+            # snapshot without us noticing -- 16_terrain_benchmark.py prints this.
+            with open(self._save_dir / "best_model_meta.json", "w") as f:
+                json.dump({
+                    "difficulty": self._difficulty,
+                    "score_distance_m": round(mean_dist, 4),
+                    "fall_rate": fall_rate,
+                    "timesteps": int(self.num_timesteps),
+                    "n_eval_episodes": self._n_eval,
+                }, f, indent=2)
             best_marker = "  ← new best, saved"
 
-        promoted = ""
-        if (CUR["enabled"] and stable
-                and mean_dist >= CUR["promote_distance"]
-                and self._difficulty < CUR["max_difficulty"]):
-            new_d = self._set_all_difficulty(self._difficulty + CUR["step"])
-            promoted = f"  ↑ difficulty raised to {new_d:.2f}"
+        # Track the best at EVERY rung, so a later demotion can never erase the
+        # evidence that we once walked well on the hardest terrain.
+        rung = f"{self._difficulty:.2f}"
+        if stable and mean_dist > self._best_by_diff.get(rung, -np.inf):
+            self._best_by_diff[rung] = round(mean_dist, 4)
 
-        self._save_state()   # persist difficulty + best_dist so a resume picks these up
+        # --- Promotion / demotion
+        transition = ""
+        promote = (CUR["enabled"] and self._allow_promotion and stable
+                   and mean_dist >= CUR["promote_distance"]
+                   and self._steps_at_diff >= CUR["min_steps_at_difficulty"]
+                   and self._difficulty < CUR["max_difficulty"])
+
+        bad = (fall_rate >= CUR["demote_fall_rate"]
+               or mean_dist < CUR["demote_distance"])
+        self._bad_evals = self._bad_evals + 1 if bad else 0
+        demote = (CUR["enabled"] and self._allow_promotion and not promote
+                  and self._bad_evals >= CUR["demote_after_bad_evals"]
+                  and self._difficulty > CUR["start_difficulty"])
+
+        if promote:
+            new_d = self._set_all_difficulty(self._difficulty + CUR["step"])
+            transition = f"  ↑ difficulty raised to {new_d:.2f}"
+            self._bad_evals, self._steps_at_diff = 0, 0
+        elif demote:
+            # Not a failure -- it means we promoted onto ground the policy could
+            # not actually hold. Dropping back lets it consolidate and re-climb.
+            new_d = self._set_all_difficulty(self._difficulty - CUR["step"])
+            transition = f"  ↓ difficulty LOWERED to {new_d:.2f} (2 bad evals)"
+            self._bad_evals, self._steps_at_diff = 0, 0
+
+        self._save_state()
 
         if self.verbose:
-            stability_note = "" if stable else "  [UNSTABLE -- not counted]"
+            note = "" if stable else "  [UNSTABLE -- not counted]"
+            best_str = ("none yet" if self._best_difficulty < 0
+                        else f"{self._best_score:.3f} m @ d{self._best_difficulty:.2f}")
             print(f"\n  [Curriculum @ {self.num_timesteps:,} steps]  "
                   f"difficulty {self._difficulty:.2f}  |  "
                   f"distance {mean_dist:.3f} m  fall_rate {fall_rate:.2f}  "
-                  f"(best {self._best_dist:.3f}){best_marker}{promoted}{stability_note}\n")
+                  f"(best {best_str}){best_marker}{transition}{note}\n")
         return True
 
     def _on_training_end(self):
@@ -328,12 +483,22 @@ class TerrainCurriculumCallback(BaseCallback):
 # ---------------------------------------------------------------------------
 
 def main():
-    difficulty, best_dist = load_curriculum_state()
+    state = load_curriculum_state()
+    difficulty = state["difficulty"]
+
+    if FIXED_DIFFICULTY is not None:
+        difficulty = FIXED_DIFFICULTY
+        state["difficulty"] = FIXED_DIFFICULTY
+
     vec_env = DummyVecEnv([make_env(i, difficulty) for i in range(PPO_CFG["n_envs"])])
 
     print("=" * 60)
     print(f"  Run: {RUN_NAME}   (UNEVEN TERRAIN)")
     print(f"  Domain randomization: {DOMAIN_RAND}")
+    print(f"  Seed: {SEED}")
+    if FIXED_DIFFICULTY is not None:
+        print(f"  FIXED difficulty {FIXED_DIFFICULTY:.2f} — curriculum promotion DISABLED "
+              f"(controlled A/B mode)")
 
     if RESUME_FROM_BEST:
         # Deliberate escape hatch: the "latest" checkpoint can end up worse
@@ -355,7 +520,7 @@ def main():
         done_steps = model.num_timesteps
         resumed = True
         print(f"  RESUMING FROM BEST_MODEL (skipping the 'latest' checkpoint on purpose): "
-              f"{done_steps:,} steps, best distance {best_dist:.3f} m")
+              f"{done_steps:,} steps")
         apply_resume_overrides(model, reset_std=RESET_STD)
     else:
         checkpoint = find_latest_checkpoint()
@@ -376,7 +541,8 @@ def main():
             env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
             model = PPO(
                 "MlpPolicy", env,
-                learning_rate = PPO_CFG["learning_rate"],
+                learning_rate = make_learning_rate(),
+                seed          = SEED,
                 n_steps       = PPO_CFG["n_steps"],
                 batch_size    = PPO_CFG["batch_size"],
                 n_epochs      = PPO_CFG["n_epochs"],
@@ -392,10 +558,13 @@ def main():
                 verbose       = 1,
             )
 
-    print(f"  Curriculum resumes at difficulty {difficulty:.2f} "
-          f"(best distance so far: {best_dist:.3f} m)")
+    _bd = state["best_difficulty"]
+    _best_str = ("none yet" if _bd < 0
+                 else f"{state['best_score']:.3f} m @ difficulty {_bd:.2f}")
+    print(f"  Curriculum resumes at difficulty {difficulty:.2f}  (best so far: {_best_str})")
     print(f"  Curriculum: {CUR['start_difficulty']} → {CUR['max_difficulty']} "
-          f"(step {CUR['step']}, promote at {CUR['promote_distance']} m)")
+          f"(step {CUR['step']}, promote at {CUR['promote_distance']} m "
+          f"and fall_rate ≤ {CUR['promote_max_fall_rate']})")
     print(f"  Target total steps: {TOTAL_STEPS:,}   parallel envs: {PPO_CFG['n_envs']}")
     print(f"  Saving to: {SAVE_DIR}")
     print("=" * 60)
@@ -408,7 +577,12 @@ def main():
 
     callbacks = CallbackList([
         CheckpointCallback(
-            save_freq         = CHECKPOINT_FREQ,
+            # CheckpointCallback counts VECTORISED steps, not environment steps:
+            # its counter ticks once per rollout step across all envs at once. So
+            # passing 100_000 with 4 envs actually saved every 400k real steps --
+            # 4x less often than intended, and it would get worse as n_envs grows.
+            # Dividing here makes the interval mean what the name says.
+            save_freq         = max(1, CHECKPOINT_FREQ // PPO_CFG["n_envs"]),
             save_path         = str(CHECKPT_DIR),
             name_prefix       = f"{RUN_NAME}_ckpt",
             save_vecnormalize = True,
@@ -418,13 +592,16 @@ def main():
             std_max = PPO_CFG["std_clamp_max"],
         ),
         TerrainCurriculumCallback(
-            save_dir            = SAVE_DIR,
-            state_path          = CURRICULUM_STATE_PATH,
-            initial_difficulty  = difficulty,
-            initial_best_dist   = best_dist,
-            eval_freq = CHECKPOINT_FREQ,
-            n_eval    = 3,
-            verbose   = 1,
+            save_dir        = SAVE_DIR,
+            state_path      = CURRICULUM_STATE_PATH,
+            state           = state,
+            allow_promotion = (FIXED_DIFFICULTY is None),
+            eval_freq       = CHECKPOINT_FREQ,
+            # 10, not 3: with 3 episodes fall_rate could only be 0/0.33/0.67/1.0,
+            # so every promotion decision was made on what was effectively a coin
+            # flip. 10 fixed-seed episodes cost ~8 s and make the number mean something.
+            n_eval          = 10,
+            verbose         = 1,
         ),
     ])
 

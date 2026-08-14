@@ -104,6 +104,60 @@ study's rigor, not a product pitch.
 review committee about the hardware setup before formal experiments — the specific "Robotics & AI
 category hardware disclosure clause" sub-question could not be confirmed either way from this sandbox.
 
+## 2026-08-14 — Five measurement/plumbing bugs found; benchmarks had been measuring the wrong model
+
+A codebase audit before further training found that most of the poor rough-terrain results
+were caused by **measurement and plumbing bugs, not by the learning algorithm.** All five are
+verified against source or measured directly, and all are fixed in this commit.
+
+**1. `best_model.zip` had been saving an early, undertrained snapshot every run.**
+`TerrainCurriculumCallback` compared `_best_dist` as a single global scalar *across all
+curriculum difficulties*. Distance naturally falls as terrain hardens, so a best set at
+difficulty 0.20 (0.865 m, step 300k) could never be beaten at difficulty 1.0 (~0.3 m).
+Evidence: in the most recent 5M-step run, `best` was set at step 300,000 and never updated
+across the remaining 4.7M steps — even though the policy went on to reach difficulty 1.0.
+**Consequence: every benchmark in `data/terrain_benchmark.csv` measured an early-curriculum
+snapshot, not the trained policy.** Fixed by ranking checkpoints lexicographically on
+(difficulty, distance) — harder terrain wins outright, ties broken by distance — plus a
+per-rung `best_by_difficulty` archive and a `best_model_meta.json` that
+`16_terrain_benchmark.py` now prints, so this can never go unnoticed again.
+
+**2. Resumed runs silently ignored the configured learning rate.** SB3 builds
+`model.lr_schedule` inside `PPO.load()`, *before* `apply_resume_overrides` assigned
+`model.learning_rate`; training reads the schedule, never the attribute. Measured directly:
+assigning `learning_rate = 1e-9` to a loaded model left `lr_schedule(1.0)` at the
+checkpoint's baked-in `0.0003`; calling `model._setup_lr_schedule()` afterwards correctly
+changed it to `1e-9`. Every resumed run had therefore been training at the checkpoint's
+original rate. (`ent_coef`/`target_kl` are read directly each update, so those did work.)
+
+**3. Checkpoints saved 4× less often than intended.** `CheckpointCallback` counts
+*vectorised* steps, so `save_freq=100_000` with `n_envs=4` saved every 400k real steps —
+and would degrade further as `n_envs` grows. Fixed by dividing by `n_envs`; verified that
+checkpoints now land at the requested interval.
+
+**4. Debris collisions could be silently missed.** `_place_debris` resizes `geom_size` at
+runtime, but MuJoCo's broadphase bounding sphere `geom_rbound` is computed at model-compile
+time and does not update on resize (measured: stays 0.0469 when it should be 0.0768 for a
+grown chunk). Contacts near a chunk's corners could be filtered out — meaning the "hard"
+terrain was potentially easier than believed. Now recomputed on every placement.
+
+**5. Nothing was seeded.** No `seed=` on PPO, no env seeding, and the curriculum's own
+evaluation env was unseeded — so consecutive evaluations faced *different terrain*, making
+eval-to-eval changes partly a measurement of the map rather than the policy. Added
+`BITTLE_SEED`, and the curriculum now evaluates on 10 fixed seeds.
+
+**Also changed:** `n_eval` 3 → 10 (with 3 episodes, `fall_rate` could only be 0/0.33/0.67/1.0,
+so every promotion decision was near a coin flip); added curriculum **demotion** after 2
+consecutive bad evaluations with a `min_steps_at_difficulty` anti-thrash guard (promotion was
+previously one-way, so a single lucky evaluation could strand the robot on ground it could
+not hold); added `BITTLE_FIXED_DIFFICULTY` for controlled A/B runs and
+`BITTLE_MODEL_PATH`/`BITTLE_BENCH_EPISODES` overrides for the benchmark.
+
+**Caveat / not yet done:** none of this has been re-benchmarked yet. The immediate next step
+is to re-run `16_terrain_benchmark.py` against the *final* model of the last run — which has
+never actually been measured — before drawing any conclusion about how good the current
+policy really is.
+
 -----
 
 *Format for new entries: date — one-line headline, then Problem/Fix/Evidence/Caveat as needed.
