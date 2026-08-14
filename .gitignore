@@ -28,6 +28,17 @@ models/*
 data/raw/
 data/*.png
 
+# MuJoCo viewer dumps — the 3D viewer writes these into the working directory
+# when you save/inspect model state. They are regenerated on demand and are
+# just noise in `git status`.
+MJDATA.TXT
+MJMODEL.TXT
+mjmodel.mjb
+mjmodel.xml
+
+# Ad-hoc screenshots
+screenshot.png
+
 # IDE
 .vscode/
 .idea/
