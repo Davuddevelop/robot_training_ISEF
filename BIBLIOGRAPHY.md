@@ -89,6 +89,20 @@ own rule above.
   itself a legitimate research contribution, not just a budget compromise —
   directly backs our "why does cheap hardware matter" framing.
 
+- **PRIOR WORK ON OUR EXACT ROBOT — must read, both found 2026-08-14:**
+- "Symmetry-Guided Reinforcement Learning for Versatile Quadrupedal Gait
+  Generation". https://arxiv.org/html/2403.10723v3
+  *Why:* RL gait generation validated on a Petoi Bittle in BOTH simulation and
+  hardware, across a speed range. Direct prior art for our platform — cite it
+  when stating what is already known, so our ablation is clearly the new part.
+- "Tiny Reinforcement Learning for Quadruped Locomotion using Decision
+  Transformers". https://arxiv.org/pdf/2402.13201
+  *Why:* explicitly frames Bittle as "a low-resource platform that lacks
+  positional encoders for its servos". Two uses: (a) a citable statement of the
+  constraint our observation design respects, and (b) it predates Petoi's
+  March-2024 feedback servos, so it dates the hardware change we flagged in
+  CLAUDE.md §4.
+
 ---
 
 NOTE: Only cite sources we have actually read/used. Placeholders above marked
