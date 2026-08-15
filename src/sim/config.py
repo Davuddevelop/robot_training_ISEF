@@ -336,6 +336,18 @@ TERRAIN = {
         # thrashing there. Dropping a rung lets the policy consolidate and
         # re-climb. Requires TWO consecutive bad evaluations so ordinary
         # evaluation noise cannot trigger it.
+        # Demote if the robot travelled less than this FRACTION of the distance
+        # its commanded speed implies it should have covered. This is the rule
+        # legged_gym and Isaac Lab both use, and it is the one our curriculum
+        # was missing: the old degenerate policy travelled 0.30 m when its
+        # command implied ~1.2 m, so it would have been demoted on every single
+        # evaluation. Instead, having survived, it was PROMOTED to harder
+        # terrain -- a feedback loop that rewarded not moving with less reason
+        # to move. Set to 0.0 to disable and fall back on demote_distance alone.
+        "demote_command_fraction": 0.35,
+
+        # Absolute distance floor, kept as a backstop for the command-relative
+        # rule above (e.g. if commanded speed is ever very low).
         "demote_distance": 0.2,
         "demote_fall_rate": 0.6,
         "demote_after_bad_evals": 2,
@@ -369,7 +381,17 @@ PPO = {
     "n_steps": 2048,
 
     # How many samples to use per gradient update (subset of n_steps).
-    "batch_size": 256,
+    #
+    # RAISED 256 -> 1024 on 2026-08-14. With n_steps=2048 x 4 envs = 8192
+    # samples per rollout, a batch of 256 meant 32 gradient steps per epoch --
+    # a very aggressive update schedule. Gradient noise falls as 1/sqrt(batch),
+    # so small batches make each step largely noise, and noise inflates the
+    # policy's KL divergence without actually improving it. The symptom, visible
+    # in every training log we have: "Early stopping ... max kl" fired on
+    # essentially EVERY iteration at epoch 3-5 of 10, meaning 50-70% of each
+    # rollout's gradient budget was thrown away, plus clip_fraction 0.28-0.32
+    # (healthy PPO sits below 0.2). 1024 gives 8 better-averaged steps instead.
+    "batch_size": 1024,
 
     # How many parallel copies of the environment to collect experience from.
     # More envs = more diverse data per update = steadier learning.
@@ -416,7 +438,13 @@ PPO = {
     # its effect can be A/B measured on its own rather than bundled with other edits.
     # NOTE: the schedule is driven by progress through `total_timesteps`, so changing
     # the step budget mid-run makes the rate jump.
-    "lr_schedule": "constant",
+    # SWITCHED to "linear" on 2026-08-14, together with the batch_size and
+    # n_epochs changes above -- all three attack the same measured problem
+    # (updates too aggressive: KL over target every iteration, clip_fraction
+    # ~0.30). Decaying to zero takes big steps early, when the policy is bad and
+    # a large step is cheap, and small careful steps late, when it is refining a
+    # gait that a large step would wreck. Standard for PPO locomotion.
+    "lr_schedule": "linear",
 
     # Hard floor and ceiling on the policy's action stddev, enforced every
     # eval cycle during training. Nothing in ordinary PPO stops std from
@@ -439,7 +467,14 @@ PPO = {
 
     # How many times to reuse the collected data for updates.
     # PPO's key innovation: safe to reuse data a few times without diverging.
-    "n_epochs": 10,
+    #
+    # LOWERED 10 -> 5 on 2026-08-14. We were never actually completing 10:
+    # target_kl halted every rollout at epoch 3-5, so the config claimed a
+    # budget it never spent. Setting 5 makes the number honest, and it matches
+    # legged_gym (num_learning_epochs = 5), the ETH stack behind ANYmal.
+    # An honest config also makes "did we use our data?" answerable from the
+    # log rather than from a print statement.
+    "n_epochs": 5,
 
     # Learning rate: how big each gradient step is.
     # 3e-4 = 0.0003 — a standard starting point for PPO on locomotion.

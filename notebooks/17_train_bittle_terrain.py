@@ -60,7 +60,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from src.sim.bittle_env import BittleEnv
 from src.sim.config import PPO as PPO_CFG
-from src.sim.config import TERRAIN, EPISODE_LENGTH_STEPS
+from src.sim.config import TERRAIN, EPISODE_LENGTH_STEPS, CONTROL_TIMESTEP
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -381,7 +381,7 @@ class TerrainCurriculumCallback(BaseCallback):
         triggering termination -- reaching the step limit is truncation, not
         a fall).
         """
-        distances, falls = [], 0
+        distances, falls, expected = [], 0, []
         for seed in self._eval_seeds:
             # Same terrains every evaluation, so a change in the number means the
             # POLICY changed, not the map. VecEnv.seed() applies at the next reset.
@@ -397,9 +397,15 @@ class TerrainCurriculumCallback(BaseCallback):
                     start_y = infos[0].get("forward_position", 0.0)
                 last_y = infos[0].get("forward_position", 0.0)
             distances.append(last_y - (start_y or 0.0))
+            # How far the commanded speed says it SHOULD have gone in the time
+            # it actually stayed upright. Comparing against this rather than a
+            # fixed number is what makes "it survived but went nowhere"
+            # detectable -- see the demotion rule in _on_step.
+            expected.append(infos[0].get("vx_command", 0.0) * steps * CONTROL_TIMESTEP)
             if steps < EPISODE_LENGTH_STEPS:
                 falls += 1
-        return float(np.mean(distances)), falls / self._n_eval
+        exp_mean = float(np.mean(expected)) if expected else 0.0
+        return float(np.mean(distances)), falls / self._n_eval, exp_mean
 
     def _on_step(self) -> bool:
         if self.num_timesteps - self._last_eval < self._eval_freq:
@@ -409,7 +415,7 @@ class TerrainCurriculumCallback(BaseCallback):
         self._steps_at_diff += self.num_timesteps - self._last_eval_steps
         self._last_eval_steps = self.num_timesteps
 
-        mean_dist, fall_rate = self._evaluate_distance()
+        mean_dist, fall_rate, expected_dist = self._evaluate_distance()
         stable = fall_rate <= CUR["promote_max_fall_rate"]
 
         # --- Best model: lexicographic on (difficulty, distance). See _is_better.
@@ -444,8 +450,16 @@ class TerrainCurriculumCallback(BaseCallback):
                    and self._steps_at_diff >= CUR["min_steps_at_difficulty"]
                    and self._difficulty < CUR["max_difficulty"])
 
+        # "Survived but went nowhere" is the failure this rule exists to catch:
+        # travelling far less than the commanded speed implies means the policy
+        # is opting out, and promoting it would reward that. legged_gym and
+        # Isaac Lab both demote on exactly this condition.
+        frac = CUR.get("demote_command_fraction", 0.0)
+        too_slow = frac > 0.0 and expected_dist > 0.0 and mean_dist < frac * expected_dist
+
         bad = (fall_rate >= CUR["demote_fall_rate"]
-               or mean_dist < CUR["demote_distance"])
+               or mean_dist < CUR["demote_distance"]
+               or too_slow)
         self._bad_evals = self._bad_evals + 1 if bad else 0
         demote = (CUR["enabled"] and self._allow_promotion and not promote
                   and self._bad_evals >= CUR["demote_after_bad_evals"]
@@ -468,9 +482,14 @@ class TerrainCurriculumCallback(BaseCallback):
             note = "" if stable else "  [UNSTABLE -- not counted]"
             best_str = ("none yet" if self._best_difficulty < 0
                         else f"{self._best_score:.3f} m @ d{self._best_difficulty:.2f}")
+            # "got" = fraction of the commanded distance actually covered.
+            # Below ~0.35 means the robot is not really obeying its speed order,
+            # which is the signature of the survive-without-travelling failure.
+            got = (f"  got {mean_dist / expected_dist:.0%} of commanded"
+                   if expected_dist > 0 else "")
             print(f"\n  [Curriculum @ {self.num_timesteps:,} steps]  "
                   f"difficulty {self._difficulty:.2f}  |  "
-                  f"distance {mean_dist:.3f} m  fall_rate {fall_rate:.2f}  "
+                  f"distance {mean_dist:.3f} m  fall_rate {fall_rate:.2f}{got}  "
                   f"(best {best_str}){best_marker}{transition}{note}\n")
         return True
 

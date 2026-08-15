@@ -208,6 +208,92 @@ versus the laptop's 3.9.0/Windows. Contact-rich locomotion is chaotic, so identi
 diverge across platforms — sandbox and laptop gait numbers differ materially. Only compare
 numbers produced on the same machine. All figures in this entry are from the laptop.
 
+## 2026-08-14 — Root cause found: the alive bonus made standing still optimal
+
+**Problem.** The policy survived at maximum terrain difficulty without travelling. Video
+confirmed it: a few attempts at the terrain, once partway through, then it stops.
+
+**Root cause, proven by arithmetic from our own config — not a hypothesis.** With
+`alive_bonus = 1.0` per step over a 500-step episode:
+
+| Strategy | Total episode reward |
+|---|---|
+| Stand still, survive all 500 steps | `1.0 × 500` = **500** |
+| Walk at 0.2 m/s, fall at step 50 | `(1.0 + 3.5×0.2) × 50 − 30` = **55** |
+
+**Standing still was 9× better than attempting to walk.** The `-30` fall penalty was never
+the deterrent — the real cost of falling was forfeiting ~450 points of remaining alive bonus.
+At the policy's measured 0.030 m/s, moving earned it 0.106/step while existing paid 1.0/step
+for free, a 9:1 ratio against moving. **The policy was not broken; it found the optimum we
+specified.**
+
+**Fix.** Follows what mainstream legged-RL stacks actually do — `legged_gym` (ETH, the ANYmal
+stack) has *no* alive bonus and sets its fall penalty to `-0.0`; Isaac Lab has no such term;
+MuJoCo Playground uses `-1.0`. Our `-30` was ~30× any published value.
+- `alive_bonus` 1.0 → **0.0** (removed, not retuned — Reda et al., MIG 2020, found no good
+  value exists: too small gives falling-forward, too large gives standing still)
+- `forward_velocity_coeff` 3.5 → 0.0, replaced by `tracking_lin_vel = 1.0 ×
+  exp(-(v_cmd − v_x)² / σ)` — bounded [0,1], and worth ≈0 when standing under a live command
+- Per-episode commanded speed sampled from **[0.08, 0.15] m/s**, added to the observation as
+  `obs[23]` (**OBS_DIM 23 → 24**) — a reward for matching a target the network cannot see is
+  unlearnable noise
+- `fall_penalty` −30 → **−1**; step-function tilt penalty → continuous `−1.0·|g_xy|²`
+- Per-step reward clipped at 0 before the fall penalty, so a living step can never score worse
+  than ending the episode (`legged_gym`'s `only_positive_rewards`)
+
+**Calibration caught during implementation — worth recording.** The standard σ is 0.25, but σ
+scales with velocity **squared** and this robot runs ~0.13× the speed of the robots that value
+was tuned for. At σ=0.25, standing still would still have scored **0.88–0.98** — reproducing
+the exact bug with extra steps. Correct value: **σ = 0.004**. Command range likewise set from
+*measured* scripted-gait speeds (0.128 m/s flat, 0.026 m/s at max difficulty), since commanding
+an unreachable speed flattens the gradient and the policy gives up.
+
+**Verified before training:** standing still earns 1.65 over 50 steps (was 50.0 — a 30×
+reduction), and the scripted gait earns **8.6× more than standing**. Incentive inverted.
+
+**Result of the 5M-step run:** `difficulty 0.50 | distance 0.453 m | fall_rate 0.70 |
+best 0.511 m @ d0.50`.
+
+| | Old (alive bonus) | New (velocity tracking) |
+|---|---|---|
+| distance | 0.303 m — **below** the 0.31 m flat patch | **0.453–0.511 m — above it** |
+| behaviour | survived by not travelling | genuinely attempts to cross |
+| fall_rate at ceiling | 0.00 | 0.70 |
+| curriculum reached | 1.00 | 0.50 |
+
+**Honest reading: the targeted bug is fixed, the overall problem is not solved.** It now
+travels ~50% farther and actually clears the flat spawn patch, and the standing-still optimum
+is unreachable — but it falls in 70% of episodes, so promotion stalls at difficulty 0.50.
+Reporting 0.50 as a regression from 1.00 would misread the old number: that 1.00 was reached
+by refusing to move.
+
+## 2026-08-14 — PPO update fix + the curriculum demotion rule that was missing
+
+**Problem (measured, and predating the reward change).** Every training log we have shows
+`Early stopping … max kl` on essentially every iteration, halting at epoch 3–5 of 10 — so
+**50–70% of each rollout's gradient budget was discarded**. Supporting numbers from the latest
+run: `approx_kl` 0.035–0.048 against `target_kl = 0.03`, `clip_fraction` 0.28–0.32 (healthy
+PPO sits below 0.2).
+
+**Cause.** 2048 steps × 4 envs = 8192 samples per rollout, split into `batch_size = 256` → **32
+gradient steps per epoch**. Gradient noise falls as 1/√batch, so small batches make each step
+largely noise — and noise inflates KL without improving the policy.
+
+**Fix.** `batch_size` 256 → **1024** (8 better-averaged steps), `n_epochs` 10 → **5** (matching
+`legged_gym`, and making the config honest about a budget it never spent), and a **linear
+learning-rate decay** to zero. All three attack the same measured problem.
+
+*Pass criterion for the next run:* early-stop rate drops from ~100% to **<20%**,
+`clip_fraction` **<0.20**, `approx_kl` in **0.01–0.02**, and evaluation distance not worse.
+
+**Separately — the demotion rule we never had.** `legged_gym` and Isaac Lab both demote a robot
+whose travelled distance falls below a fraction of what its commanded speed implies. We had no
+such rule, only distance and fall-rate floors. **The old degenerate policy travelled 0.30 m
+when its command implied ~1.2 m — it would have been demoted at every single evaluation.
+Instead, having survived, it was promoted to harder terrain: a feedback loop that rewarded not
+moving with even less reason to move.** Added `demote_command_fraction = 0.35`, and the
+curriculum line now prints "got N% of commanded" so the failure is visible at a glance.
+
 -----
 
 *Format for new entries: date — one-line headline, then Problem/Fix/Evidence/Caveat as needed.
