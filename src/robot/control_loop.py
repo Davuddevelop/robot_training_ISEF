@@ -16,7 +16,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from src.sim.config import (
-    OBS_DIM, ACTION_DIM, ACTION_LIMIT, CONTROL_TIMESTEP, HARDWARE,
+    OBS_DIM, ACTION_DIM, ACTION_LIMIT, CONTROL_TIMESTEP, HARDWARE, COMMAND,
 )
 from src.sim.bittle_env import BittleEnv
 from src.robot.calibration import action_to_servo_degrees
@@ -92,6 +92,13 @@ class RealRobotController:
         self._prev_action_for_obs = np.zeros(ACTION_DIM, dtype=np.float32)
         self._last_command_rad    = np.zeros(ACTION_DIM, dtype=np.float32)
 
+        # Forward speed (m/s) to ask the policy for. Defaults to the middle of
+        # the range it was trained on. This is a throttle you can change at
+        # runtime -- the policy was trained across a range of commands, so it
+        # should obey a different one without retraining. Values far outside
+        # COMMAND["vx_range"] were never seen in training and will not work.
+        self.vx_command = float(np.mean(COMMAND["vx_range"]))
+
     # ------------------------------------------------------------------ obs
 
     def _build_obs(self, imu: dict | None) -> np.ndarray:
@@ -104,6 +111,12 @@ class RealRobotController:
             [6:14]  last commanded joint angles (radians, absolute)
             [14:22] action from two steps ago
             [22]    gait phase timer (0→1→0→1…)
+            [23]    commanded forward speed (m/s)
+
+        THIS MUST MATCH bittle_env._get_obs() EXACTLY. If the real robot builds
+        its observation even slightly differently from the simulator the policy
+        was trained in, the policy is being fed something it has never seen and
+        sim-to-real fails for a reason that has nothing to do with physics.
         """
         obs = np.zeros(OBS_DIM, dtype=np.float32)
 
@@ -117,6 +130,10 @@ class RealRobotController:
         obs[6:14]  = self._last_command_rad
         obs[14:22] = self._prev_action_for_obs
         obs[22]    = (self._step_count * CONTROL_TIMESTEP) % 1.0
+        # The speed we are asking the robot for. On hardware this is OUR choice,
+        # not a measurement, so it needs no sensor -- set self.vx_command to
+        # drive the robot faster or slower without retraining.
+        obs[23]    = self.vx_command
 
         return obs
 

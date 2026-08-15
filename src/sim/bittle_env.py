@@ -20,7 +20,7 @@ import mujoco
 
 from src.sim.config import (
     OBS_DIM, ACTION_DIM, ACTION_LIMIT,
-    NEUTRAL_POSE, REWARD, DOMAIN_RAND, TERRAIN,
+    NEUTRAL_POSE, REWARD, DOMAIN_RAND, TERRAIN, COMMAND,
     SIM_TIMESTEP, CONTROL_TIMESTEP, EPISODE_LENGTH_STEPS,
     BITTLE_MODEL_PATH, BITTLE_ROUGH_MODEL_PATH,
 )
@@ -118,6 +118,10 @@ class BittleEnv(gym.Env):
         self._prev_action_for_obs = np.zeros(ACTION_DIM)
         self._last_command = self._neutral.copy()      # absolute angles we last commanded
         self._gait_phase = 0.0
+        # Forward speed (m/s) this episode is being asked for. Re-sampled every
+        # reset, and fed to the policy as obs[23] -- a reward for matching a
+        # target the network cannot see would be unlearnable noise.
+        self._vx_command = float(np.mean(COMMAND["vx_range"]))
         self._latency_steps = 0
         self._command_buffer = []
 
@@ -320,6 +324,12 @@ class BittleEnv(gym.Env):
         self._last_command = self._neutral.copy()
         self._gait_phase = 0.0
 
+        # Draw this episode's speed order. Varying it (rather than always asking
+        # for the same speed) stops the policy memorising one fixed gait and
+        # forces it to actually READ the command it is given.
+        lo, hi = COMMAND["vx_range"]
+        self._vx_command = float(self.np_random.uniform(lo, hi))
+
         # Generate fresh uneven terrain for this episode (if terrain is on).
         # Done before resetting the robot so it spawns onto the new ground.
         if self.terrain:
@@ -408,6 +418,12 @@ class BittleEnv(gym.Env):
             "forward_velocity": forward_velocity,
             "forward_position": float(self._mj_data.qpos[FORWARD_AXIS]),
             "height": float(self._mj_data.qpos[2]),
+            # Velocity tracking is now the primary metric: every condition gets
+            # the same command, so "how well did it obey?" is a cleaner
+            # comparison than raw distance, which conflates wanting to go fast
+            # with being able to.
+            "vx_command": self._vx_command,
+            "vx_error": abs(self._vx_command - forward_velocity),
             "terrain_difficulty": self._terrain_difficulty,
         }
 
@@ -433,28 +449,60 @@ class BittleEnv(gym.Env):
         obs[6:14] = self._last_command           # last commanded joint angles
         obs[14:22] = self._prev_action_for_obs   # the action before that
         obs[22] = self._gait_phase
+        obs[23] = self._vx_command               # the speed we are asking for
         return obs
 
     # ------------------------------------------------------------------ reward
     def _compute_reward(self, action):
+        """
+        Velocity-TRACKING reward: pay for matching the commanded speed.
+
+        The old reward was `forward_velocity_coeff * speed + alive_bonus`, which
+        had a fatal property: standing still still collected the alive bonus
+        every step, so the best strategy was to survive without travelling.
+        Measured from that config -- standing all 500 steps scored 500, walking
+        and falling at step 50 scored 55. The policy was not broken; 500 > 55.
+
+        The fix is to make the reward peak at a SPECIFIC speed instead of rising
+        forever, so that being too SLOW is punished just like being too fast.
+        With our tuned sigma (0.004), standing still while commanded 0.13 m/s
+        scores about 0.03 out of a possible 1.0 -- there is no longer any
+        meaningful reward for merely existing, so opting out stops paying.
+        """
         forward_velocity = float(self._mj_data.qvel[FORWARD_AXIS])
         lateral_velocity = float(self._mj_data.qvel[0])   # X axis = sideways
 
-        reward = REWARD["forward_velocity_coeff"] * forward_velocity
+        # --- The one positive term. Bounded to [0, 1], so nothing can drown it.
+        # exp(-error^2 / sigma) is a smooth hill peaking at the commanded speed:
+        # perfect tracking = 1.0, and it decays as the error grows. Unlike a
+        # linear speed reward it can punish going too SLOW as well as too fast.
+        vel_error = (self._vx_command - forward_velocity) ** 2
+        reward = REWARD["tracking_lin_vel"] * float(
+            np.exp(-vel_error / COMMAND["tracking_sigma"]))
+
+        # Retained only for reproducing the old behaviour (coefficient is 0.0 now).
+        reward += REWARD["forward_velocity_coeff"] * forward_velocity
         reward += REWARD["alive_bonus"]
 
         # Lateral drift: squared so small drifts are cheap, large crab-walks are costly.
         reward += REWARD["lateral_velocity_penalty"] * lateral_velocity ** 2
 
-        # Tilt penalty: how far from upright are we? (angle between body-up and world-up)
-        tilt_angle = np.arccos(np.clip(self._uprightness(), -1.0, 1.0))
-        if tilt_angle > REWARD["tilt_threshold"]:
-            reward += REWARD["tilt_penalty"]
+        # Tilt: continuous, from the horizontal part of projected gravity.
+        # g[0]^2 + g[1]^2 = sin^2(tilt): 0 upright, 0.25 at 30deg, 0.5 at 45deg.
+        # A smooth slope tells the policy WHICH WAY to correct; the old step
+        # function only told it where the cliff was.
+        gravity = self._projected_gravity()
+        reward += REWARD["tilt_penalty_coeff"] * float(gravity[0] ** 2 + gravity[1] ** 2)
 
         # Energy proxy: penalize large offsets. Jitter proxy: penalize fast changes.
         reward += REWARD["action_size_penalty"] * np.sum(np.square(action))
         reward += REWARD["action_smoothness_penalty"] * np.sum(np.square(action - self._prev_action))
-        return float(reward)
+
+        # Clip the per-step total at zero BEFORE the fall penalty is added in
+        # step(). If a living step could score negative, ending the episode
+        # early becomes an improvement -- i.e. falling on purpose to stop the
+        # bleeding. legged_gym does exactly this (`only_positive_rewards`).
+        return float(max(reward, 0.0))
 
     def _is_fallen(self):
         tilt_angle = np.arccos(np.clip(self._uprightness(), -1.0, 1.0))

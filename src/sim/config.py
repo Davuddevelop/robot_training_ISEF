@@ -29,9 +29,15 @@ OBS_LAYOUT = {
     "gait_phase_timer":   (22, 23), # a clock signal (0→1→0→1...) that helps the robot
                                     # learn rhythmic gaits — without this, walking tends
                                     # to be jerky rather than cyclic
+    "velocity_command":   (23, 24), # the forward speed (m/s) the robot is being TOLD to
+                                    # hit this episode. The policy must SEE the command to
+                                    # be able to obey it — a reward for matching a target
+                                    # the network cannot observe is unlearnable noise.
+                                    # Fully sim-to-real valid: it is a number WE choose,
+                                    # not a measurement, so the real robot has it too.
 }
 
-OBS_DIM = 23  # total size of the observation vector
+OBS_DIM = 24  # total size of the observation vector (23 -> 24 on 2026-08-14)
 
 # Why these observations and not others?
 # - IMU is the ONLY real sensor on the Bittle. Everything else comes from the sim or memory.
@@ -66,6 +72,47 @@ NEUTRAL_POSE = [0.56, 0.56, 0.56, 0.56, 0.56, 0.56, 0.56, 0.56]
 # This is where your scientific intuition goes into code.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# VELOCITY COMMAND
+# Each episode the robot is TOLD a target forward speed, that number is put in
+# the observation, and the reward pays for MATCHING it.
+#
+# Why this replaced "go as fast as you can" (2026-08-14): with a per-step
+# alive_bonus, standing still for a whole 500-step episode scored 500, while
+# walking and falling at step 50 scored 55 -- standing was 9x better, so the
+# policy correctly learned to barely move. Under a tracking reward, standing
+# still when told to move earns almost nothing, so opting out stops paying.
+# This is what every mainstream legged-RL stack does (legged_gym, Isaac Lab,
+# MuJoCo Playground); none of them reward raw speed, and none use an alive bonus.
+# ---------------------------------------------------------------------------
+COMMAND = {
+    # Forward speed range (m/s) sampled once per episode.
+    #
+    # These are calibrated to what this robot ACTUALLY achieves, measured from
+    # the scripted-gait benchmark -- 0.128 m/s on flat, 0.068 m/s at difficulty
+    # 0.5, 0.026 m/s at difficulty 1.0. Commanding a speed the robot cannot
+    # reach is the number-one way this reward fails: the error is large no
+    # matter what it does, exp(-large) ~ 0 everywhere, the gradient vanishes and
+    # the policy gives up. So the range spans "slow but real" to "as good as the
+    # best hand-tuned gait on flat ground" -- ambitious but not fantasy.
+    "vx_range": (0.08, 0.15),
+
+    # Width of the tracking reward's tolerance, in (m/s)^2:
+    #     reward = exp(-(v_cmd - v_actual)^2 / sigma)
+    #
+    # SIGMA MUST BE SCALED TO THE ROBOT'S SPEED. legged_gym uses 0.25, but for
+    # robots commanded up to 1.0 m/s. The error is SQUARED, so sigma scales with
+    # velocity squared: our ~0.13x speeds imply 0.25 * 0.13^2 ~ 0.004.
+    #
+    # Why this matters more than it sounds -- what STANDING STILL scores:
+    #     sigma=0.25   -> 0.88 to 0.98   (standing is still nearly optimal!)
+    #     sigma=0.05   -> 0.52 to 0.88
+    #     sigma=0.004  -> 0.004 to 0.20  <-- what we use
+    # Copying 0.25 unchanged would have reproduced the exact bug we are fixing,
+    # just with extra steps.
+    "tracking_sigma": 0.004,
+}
+
 REWARD = {
     # Positive: reward forward movement (m/s in the robot's forward direction).
     # This MUST dominate, or the policy just stands still to farm the alive bonus.
@@ -73,12 +120,19 @@ REWARD = {
     # scored 250 reward but walked 0.03 m — it stood still. Raising this makes
     # walking clearly worth more than standing.
     #
-    # Lowered from 5.0 -> 3.5: at 5.0, a modest 0.1 m/s already scored 0.5 per
-    # step -- as much as the entire alive_bonus -- so gambling on extra speed
-    # cost the policy almost nothing relative to staying upright. A 200k-step
-    # A/B at terrain difficulty 0.4 confirmed it: 5.0/0.5 oscillated up to
-    # fall_rate 1.00; 3.5/1.0 never fell once AND covered more distance.
-    "forward_velocity_coeff": 3.5,
+    # RETIRED 2026-08-14 -- kept at 0.0 so old configs still load, but the
+    # reward no longer pays for raw speed. Rewarding "faster is always better"
+    # cannot express "go at THIS speed", so it could never punish going too
+    # slow; combined with alive_bonus it made standing still optimal. Replaced
+    # by tracking_lin_vel below. Set >0 only to reproduce the old behaviour.
+    "forward_velocity_coeff": 0.0,
+
+    # Weight on the velocity-tracking reward: exp(-(v_cmd - v_x)^2 / sigma).
+    # This is now the ONLY positive term. Bounded to [0, 1], so no other term
+    # can drown it out, and it is worth ~0 when standing still under a nonzero
+    # command -- which is exactly the property the old reward lacked.
+    # legged_gym/Isaac Lab/MuJoCo Playground all use 1.0 here.
+    "tracking_lin_vel": 1.0,
 
     # Positive: bonus for each step it stays upright (does not fall). With
     # forward_velocity_coeff=5.0 a moving robot always out-scores a standing one,
@@ -86,9 +140,21 @@ REWARD = {
     # which stops the "lunge forward then fall over" behaviour (a 300k run moved
     # 0.36 m but fell after 70 of 500 steps when this was only 0.1).
     #
-    # Raised from 0.5 -> 1.0 alongside the forward_velocity_coeff drop above,
-    # so staying balanced is clearly worth more than the speed it gives up.
-    "alive_bonus": 1.0,
+    # RETIRED 2026-08-14 -- set to 0.0. THIS WAS THE BUG.
+    #
+    # A per-step bonus for merely existing means the best way to score is to
+    # exist for as long as possible. Measured from this exact config: standing
+    # still for all 500 steps = 500 reward; walking at 0.2 m/s and falling at
+    # step 50 = 55. Standing was 9x better. The -30 fall penalty was never the
+    # real deterrent -- the 450 points of FORFEITED alive bonus was.
+    #
+    # legged_gym (the ETH stack behind ANYmal) has no alive bonus at all.
+    # Staying upright is rewarded implicitly: falling ends the episode, and the
+    # only positive reward is one you can only earn by moving. Reda et al.
+    # (MIG 2020) found no good value exists -- too small gives falling-forward,
+    # too large gives standing still -- which is why the term is removed, not
+    # retuned.
+    "alive_bonus": 0.0,
 
     # Negative: penalty for drifting sideways (lateral = X axis, not forward Y).
     # Without this the policy sometimes crab-walks to one side rather than going
@@ -97,10 +163,24 @@ REWARD = {
     # but large crab-walk is strongly penalised.
     "lateral_velocity_penalty": -0.5,
 
-    # Negative: penalty if the robot tilts too much.
-    # Applied when roll or pitch exceeds this threshold (radians).
+    # Negative: penalty for tilting away from upright, applied CONTINUOUSLY.
+    #
+    # Replaces a step function ("if tilt > 0.5 rad: -1.0") which had ZERO
+    # gradient everywhere except at the cliff edge -- it told the policy that
+    # leaning 27 degrees was perfectly fine and 29 degrees was a disaster, with
+    # no signal in between about which direction to correct. A cliff teaches
+    # avoidance, not control, which is part of why the policy became timid.
+    #
+    # The new term uses the horizontal components of projected gravity:
+    #   g[0]^2 + g[1]^2 = sin^2(tilt)  ->  0.0 upright, 0.25 at 30deg, 0.5 at 45deg
+    # Smooth, bounded, and computed only from what the real IMU already gives
+    # us, so it stays sim-to-real valid. This is legged_gym's "orientation" term.
+    "tilt_penalty_coeff": -1.0,
+
+    # Kept only so `_is_fallen` and old configs still resolve; the continuous
+    # term above is what actually shapes behaviour now.
     "tilt_threshold": 0.5,       # ~28 degrees
-    "tilt_penalty": -1.0,        # subtracted from reward when threshold exceeded
+    "tilt_penalty": 0.0,         # RETIRED -- superseded by tilt_penalty_coeff
 
     # Negative: penalty for commanding large joint angles.
     # Acts as a proxy for torque/energy usage.
@@ -125,7 +205,15 @@ REWARD = {
     # This penalty makes falling COST something concrete, not just forfeit
     # potential future gains, so "walk carefully, survive" clearly beats
     # "sprint and risk it" in expectation.
-    "fall_penalty": -30.0,
+    # REDUCED -30.0 -> -1.0 on 2026-08-14. The reasoning above was sound while
+    # the reward paid for raw speed, but -30 turned out to be ~30x larger than
+    # any value used in published legged-RL work (legged_gym uses -0.0;
+    # MuJoCo Playground -1.0; Isaac Lab has no such term). Combined with the
+    # alive bonus it produced extreme risk aversion -- the policy stopped
+    # attempting terrain at all. With a velocity-tracking reward, falling is
+    # already punished implicitly (the episode ends, so all remaining tracking
+    # reward is forfeited); the explicit penalty only needs to break ties.
+    "fall_penalty": -1.0,
 }
 
 # ---------------------------------------------------------------------------
