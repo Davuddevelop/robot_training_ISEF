@@ -92,11 +92,11 @@ BITTLE X: 8 leg servos (action) + 1 fixed neck servo
 
 ## 7. THE RL DESIGN
 
-**Observations:** IMU orientation + angular velocity, last commanded joint angles, previous action, a gait-phase timer.
+**Observations:** IMU orientation (projected gravity) + angular velocity, last commanded joint angles, previous action, a gait-phase timer, and the commanded forward speed for this episode (24 dims total).
 **Actions:** 8 target leg-joint angles (offsets from a neutral stance).
-**Reward (keep simple):** forward-velocity reward + alive bonus − penalties for falling/high tilt, excessive action size (torque proxy), and action-change rate (jitter).
+**Reward:** the robot is given a target forward speed each episode and rewarded for TRACKING it — `exp(-(commanded_speed − actual_speed)² / σ)` — plus small penalties for tilt, lateral drift, jerky/large actions, and a penalty on falling. There is deliberately no reward for merely surviving. UPDATED 2026-08-14: the original design here ("forward-velocity reward + alive bonus") is what we actually built first, and it turned out to be broken — provable from its own arithmetic, standing still scored 9× higher than attempting to walk, because the per-step "alive bonus" paid out whether or not the robot moved. See EXPERIMENT_LOG.md, 2026-08-14, for the full proof and the fix.
 **Domain randomization factors (these are my research variables):** ground friction, body-mass variation, motor-strength variation, control latency, IMU sensor noise, initial-pose variation.
-**System identification (simplified):** approximate the real servo's response delay, saturation limits, and gain — "closer than default sim, not perfect physics."
+**System identification (simplified):** approximate the real servo's response delay, saturation limits, and gain — "closer than default sim, not perfect physics." See §4's joint-position-feedback flag — if confirmed on the real board, these can be measured directly rather than inferred.
 
 -----
 
@@ -104,7 +104,7 @@ BITTLE X: 8 leg servos (action) + 1 fixed neck servo
 
 **Conditions:** (1) no domain randomization, (2) full domain randomization, (3) domain randomization + system ID. Plus an **ablation**: turn each randomization factor on/off **one at a time** and measure the impact.
 **Metrics:** distance in fixed time, average speed, fall rate, time-to-fall, stability (IMU tilt variance), consistency (std dev across trials).
-**Rigor:** ≥10 trials per condition; same surface, **same battery-level range**, same starting pose.
+**Rigor:** ≥10 trials per condition; same terrain difficulty level (exact value TBD — pending locomotion quality being solid; see §10), **same battery-level range**, same starting pose.
 
 -----
 
@@ -118,8 +118,12 @@ BITTLE X: 8 leg servos (action) + 1 fixed neck servo
 
 ## 10. SCOPE
 
-**IN:** flat-ground walking, the sim-to-real transfer, the ablation study, system ID.
-**OUT (do not let me add these):** thermal/heat sensors, human detection, extra sensors, rough-terrain claims, voice control. Rough terrain and applications are "future work" only.
+**IN:** rough-terrain walking (a difficulty curriculum from flat to maximum bump/rubble roughness), the sim-to-real transfer, the ablation study, system ID.
+**OUT (do not let me add these):** thermal/heat sensors, human detection, extra sensors, voice control, rescue/autonomy/real-world-deployment claims.
+
+**UPDATED 2026-08-14 — why terrain moved from OUT to IN.** This section originally scoped the project to flat-ground walking only, with rough terrain deferred as future work. That changed for a specific, evidenced reason, not scope creep: benchmarked, the hand-tuned scripted gait already handles flat ground about as well as the learned policy (1.284 m vs. ~0.79–1.05 m across runs) — a simple fixed gait doesn't need RL to solve flat walking. Rough terrain is where the learned policy's advantage over hand-tuning becomes measurable (see `data/terrain_benchmark.csv`), which is the actual justification for using RL at all. Keeping the brief saying "flat-ground only" while the whole project studies rough terrain would be a real inconsistency a judge could catch — this update just makes the brief match the evidence-based decision already made.
+
+Applications beyond flat/rough-terrain locomotion (rescue, autonomy, real-world deployment) remain OUT and always will be — see §3.
 
 -----
 
