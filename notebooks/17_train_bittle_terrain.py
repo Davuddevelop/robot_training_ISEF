@@ -350,9 +350,19 @@ class TerrainCurriculumCallback(BaseCallback):
         self._set_all_difficulty(self._difficulty)
 
     def _set_all_difficulty(self, difficulty):
+        """
+        difficulty is the CEILING the curriculum has reached so far.
+
+        Training envs get a BAND [max(0, ceiling - band), ceiling] -- every
+        rollout mixes the current difficulty with easier ones already learned,
+        so nothing is ever fully "left behind". The eval env stays pinned to
+        the single ceiling value: promotion decisions need one fixed thing to
+        measure, not a moving target.
+        """
         difficulty = float(min(difficulty, CUR["max_difficulty"]))
         self._difficulty = difficulty
-        self.training_env.env_method("set_terrain_difficulty", difficulty)
+        band_lo = max(0.0, difficulty - CUR["band"])
+        self.training_env.env_method("set_difficulty_range", band_lo, difficulty)
         self._eval_env.env_method("set_terrain_difficulty", difficulty)
         return difficulty
 

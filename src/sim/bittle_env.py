@@ -56,6 +56,10 @@ class BittleEnv(gym.Env):
         self._terrain_difficulty = (
             TERRAIN["difficulty"] if terrain_difficulty is None else terrain_difficulty
         )
+        # A single-value range means "always exactly this difficulty" -- the
+        # existing behaviour, unchanged unless set_difficulty_range() is called.
+        self._difficulty_lo = self._terrain_difficulty
+        self._difficulty_hi = self._terrain_difficulty
 
         # --- Spaces (the contract with SB3) ---
         self.observation_space = spaces.Box(
@@ -154,12 +158,33 @@ class BittleEnv(gym.Env):
     # ------------------------------------------------------------------ terrain
     def set_terrain_difficulty(self, difficulty):
         """
-        Set the terrain difficulty (0.0 = flat, 1.0 = max bumps).
-
-        The training curriculum calls this to make the ground harder as the
-        robot improves. Takes effect on the NEXT reset (bumps regenerate then).
+        Pin the terrain to ONE exact difficulty (0.0 = flat, 1.0 = max bumps).
+        Every episode from here on uses this same value. Convenience wrapper
+        around set_difficulty_range(d, d) -- kept because eval/benchmark/watch
+        scripts need a single fixed operating point to measure, not a range.
         """
-        self._terrain_difficulty = float(np.clip(difficulty, 0.0, 1.0))
+        self.set_difficulty_range(difficulty, difficulty)
+
+    def set_difficulty_range(self, lo, hi):
+        """
+        Set a BAND of difficulties; each reset() samples one value from it.
+
+        Why a band instead of one number: a run that trains at a single
+        difficulty and only ever moves it up produces a specialist, not a
+        generalist. Measured directly (2026-08-14 run): after the curriculum
+        pushed a policy to difficulty 1.0, it fell in 100% of FLAT-ground
+        episodes -- terrain the same run's own earlier snapshot walked
+        perfectly. Nothing in training ever asked it to remember easy ground
+        once it moved past it. Sampling per episode from [lo, hi] means every
+        PPO rollout contains a mix of difficulties, so remembering flat ground
+        stays rewarded for as long as flat ground is still in the band.
+
+        Takes effect on the NEXT reset (a difficulty mid-episode would change
+        the ground under the robot's feet, which is not what curriculum
+        difficulty is for).
+        """
+        self._difficulty_lo = float(np.clip(min(lo, hi), 0.0, 1.0))
+        self._difficulty_hi = float(np.clip(max(lo, hi), 0.0, 1.0))
 
     def get_terrain_difficulty(self):
         return self._terrain_difficulty
@@ -329,6 +354,13 @@ class BittleEnv(gym.Env):
         # forces it to actually READ the command it is given.
         lo, hi = COMMAND["vx_range"]
         self._vx_command = float(self.np_random.uniform(lo, hi))
+
+        # Draw THIS episode's difficulty from the band. When lo == hi (the
+        # default, and what a fixed-difficulty eval env uses) this always
+        # picks the same value, so nothing changes for code that never calls
+        # set_difficulty_range().
+        self._terrain_difficulty = float(
+            self.np_random.uniform(self._difficulty_lo, self._difficulty_hi))
 
         # Generate fresh uneven terrain for this episode (if terrain is on).
         # Done before resetting the robot so it spawns onto the new ground.

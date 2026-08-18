@@ -294,6 +294,43 @@ Instead, having survived, it was promoted to harder terrain: a feedback loop tha
 moving with even less reason to move.** Added `demote_command_fraction = 0.35`, and the
 curriculum line now prints "got N% of commanded" so the failure is visible at a glance.
 
+## 2026-08-15 — Band-sampled curriculum to fix catastrophic forgetting
+
+**Problem, already proven (2026-08-14 entry above).** Training pinned every environment to
+ONE exact difficulty at a time, moved only upward. After the curriculum pushed a policy to
+difficulty 1.0, it fell in **100% of flat-ground episodes** — terrain the same run's own
+earlier snapshot walked perfectly. Once the ceiling moved on, easy terrain never appeared in a
+rollout again, so nothing in training rewarded remembering it.
+
+**Fix.** `BittleEnv.set_difficulty_range(lo, hi)` replaces the single-value
+`set_terrain_difficulty` for training envs; each `reset()` now samples that episode's
+difficulty uniformly from the band. `set_terrain_difficulty(d)` still exists as a thin wrapper
+(`set_difficulty_range(d, d)`), so the eval env, `16_terrain_benchmark.py`, and
+`18_watch_bittle_terrain.py` — all of which need one fixed difficulty to measure, not a moving
+target — are completely unaffected.
+
+The curriculum callback now sets training envs to `[max(0, ceiling − band), ceiling]` (band =
+0.3) while keeping the eval env pinned to the single ceiling value, so promotion decisions
+still measure one fixed thing. Table of the resulting bands:
+
+| ceiling | training band | eval fixed at |
+|---|---|---|
+| 0.1 | [0.00, 0.10] | 0.10 |
+| 0.5 | [0.20, 0.50] | 0.50 |
+| 1.0 | [0.70, 1.00] | 1.00 |
+
+Flat ground stays in the mix until the ceiling passes 0.3, and every rung the policy has
+already unlocked stays in the mix permanently after that.
+
+**Verified before training:** direct sampling test confirms 10 episodes at `set_difficulty_range(0.2,
+0.5)` land in `[0.2, 0.5]` and vary episode to episode; fixed-difficulty callers still get the
+exact same value every time. Smoke-tested end to end with a short training run — no errors,
+curriculum output unchanged in shape (band degenerates to a single point at ceiling=0.0, so the
+first few evaluations look identical to before by construction).
+
+**Not yet run at scale** — this has not been tested over millions of steps, so whether it
+actually prevents forgetting (rather than just being correctly implemented) is still open.
+
 -----
 
 *Format for new entries: date — one-line headline, then Problem/Fix/Evidence/Caveat as needed.

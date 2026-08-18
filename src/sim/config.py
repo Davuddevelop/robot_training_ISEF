@@ -310,7 +310,20 @@ TERRAIN = {
         "enabled": True,
         "start_difficulty": 0.0,       # begin on flat ground
         "max_difficulty": 1.0,         # hardest terrain to reach
-        "step": 0.1,                   # how much to raise difficulty each time
+        "step": 0.1,                   # how much to raise the CEILING each time
+
+        # Width of the difficulty BAND training envs sample from each episode:
+        # [max(0, ceiling - band), ceiling]. Added 2026-08-15 to fix catastrophic
+        # forgetting -- training previously pinned EVERY env to one exact
+        # difficulty, so once the ceiling moved on, easy terrain never appeared
+        # in a rollout again and nothing rewarded remembering it. Measured
+        # directly: a run pushed to difficulty 1.0 fell in 100% of flat-ground
+        # episodes that an earlier snapshot from the SAME run walked perfectly.
+        # A band keeps every rung the policy has already unlocked in the mix.
+        # Evaluation still runs at the single top-of-band value (see the
+        # callback) -- we need one fixed measuring instrument for promotion
+        # decisions, not a moving target.
+        "band": 0.3,
         # Raise difficulty when the mean forward distance (metres) over the
         # last evaluation exceeds this. Tuned so the robot must actually walk
         # across the current terrain before it gets harder.
